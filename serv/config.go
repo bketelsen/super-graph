@@ -26,37 +26,18 @@ type config struct {
 	EnableTracing  bool   `mapstructure:"enable_tracing"`
 	UseAllowList   bool   `mapstructure:"use_allow_list"`
 	Production     bool
-	WatchAndReload bool   `mapstructure:"reload_on_config_change"`
-	AuthFailBlock  bool   `mapstructure:"auth_fail_block"`
-	SeedFile       string `mapstructure:"seed_file"`
-	MigrationsPath string `mapstructure:"migrations_path"`
+	WatchAndReload bool     `mapstructure:"reload_on_config_change"`
+	AuthFailBlock  bool     `mapstructure:"auth_fail_block"`
+	SeedFile       string   `mapstructure:"seed_file"`
+	MigrationsPath string   `mapstructure:"migrations_path"`
+	SecretKey      string   `mapstructure:"secret_key"`
+	AllowedOrigins []string `mapstructure:"cors_allowed_origins"`
+	DebugCORS      bool     `mapstructure:"cors_debug"`
 
 	Inflections map[string]string
 
-	Auth struct {
-		Type          string
-		Cookie        string
-		CredsInHeader bool `mapstructure:"creds_in_header"`
-
-		Rails struct {
-			Version       string
-			SecretKeyBase string `mapstructure:"secret_key_base"`
-			URL           string
-			Password      string
-			MaxIdle       int `mapstructure:"max_idle"`
-			MaxActive     int `mapstructure:"max_active"`
-			Salt          string
-			SignSalt      string `mapstructure:"sign_salt"`
-			AuthSalt      string `mapstructure:"auth_salt"`
-		}
-
-		JWT struct {
-			Provider   string
-			Secret     string
-			PubKeyFile string `mapstructure:"public_key_file"`
-			PubKeyType string `mapstructure:"public_key_type"`
-		}
-	}
+	Auth  configAuth
+	Auths []configAuth
 
 	DB struct {
 		Type        string
@@ -77,6 +58,8 @@ type config struct {
 		Tables []configTable
 	} `mapstructure:"database"`
 
+	Actions []configAction
+
 	Tables []configTable
 
 	RolesQuery  string `mapstructure:"roles_query"`
@@ -85,8 +68,41 @@ type config struct {
 	abacEnabled bool
 }
 
+type configAuth struct {
+	Name          string
+	Type          string
+	Cookie        string
+	CredsInHeader bool `mapstructure:"creds_in_header"`
+
+	Rails struct {
+		Version       string
+		SecretKeyBase string `mapstructure:"secret_key_base"`
+		URL           string
+		Password      string
+		MaxIdle       int `mapstructure:"max_idle"`
+		MaxActive     int `mapstructure:"max_active"`
+		Salt          string
+		SignSalt      string `mapstructure:"sign_salt"`
+		AuthSalt      string `mapstructure:"auth_salt"`
+	}
+
+	JWT struct {
+		Provider   string
+		Secret     string
+		PubKeyFile string `mapstructure:"public_key_file"`
+		PubKeyType string `mapstructure:"public_key_type"`
+	}
+
+	Header struct {
+		Name   string
+		Value  string
+		Exists bool
+	}
+}
+
 type configColumn struct {
 	Name       string
+	Type       string
 	ForeignKey string `mapstructure:"related_to"`
 }
 
@@ -155,6 +171,12 @@ type configRole struct {
 	tablesMap map[string]*configRoleTable
 }
 
+type configAction struct {
+	Name     string
+	SQL      string
+	AuthName string `mapstructure:"auth_name"`
+}
+
 func newConfig(name string) *viper.Viper {
 	vi := viper.New()
 
@@ -185,8 +207,8 @@ func newConfig(name string) *viper.Viper {
 	vi.SetDefault("env", "development")
 
 	vi.BindEnv("env", "GO_ENV") //nolint: errcheck
-	vi.BindEnv("HOST", "HOST")  //nolint: errcheck
-	vi.BindEnv("PORT", "PORT")  //nolint: errcheck
+	vi.BindEnv("host", "HOST")  //nolint: errcheck
+	vi.BindEnv("port", "PORT")  //nolint: errcheck
 
 	vi.SetDefault("auth.rails.max_idle", 80)
 	vi.SetDefault("auth.rails.max_active", 12000)
@@ -282,24 +304,46 @@ func (c *config) Init(vi *viper.Viper) error {
 func (c *config) validate() {
 	rm := make(map[string]struct{})
 
-	for i := range c.Roles {
-		name := c.Roles[i].Name
+	for _, v := range c.Roles {
+		name := strings.ToLower(v.Name)
 
 		if _, ok := rm[name]; ok {
-			errlog.Fatal().Msgf("duplicate config for role '%s'", c.Roles[i].Name)
+			errlog.Fatal().Msgf("duplicate config for role '%s'", v.Name)
 		}
 		rm[name] = struct{}{}
 	}
 
 	tm := make(map[string]struct{})
 
-	for i := range c.Tables {
-		name := c.Tables[i].Name
+	for _, v := range c.Tables {
+		name := strings.ToLower(v.Name)
 
 		if _, ok := tm[name]; ok {
-			errlog.Fatal().Msgf("duplicate config for table '%s'", c.Tables[i].Name)
+			errlog.Fatal().Msgf("duplicate config for table '%s'", v.Name)
 		}
 		tm[name] = struct{}{}
+	}
+
+	am := make(map[string]struct{})
+
+	for _, v := range c.Auths {
+		name := strings.ToLower(v.Name)
+
+		if _, ok := am[name]; ok {
+			errlog.Fatal().Msgf("duplicate config for auth '%s'", v.Name)
+		}
+		am[name] = struct{}{}
+	}
+
+	for _, v := range c.Actions {
+		if len(v.AuthName) == 0 {
+			continue
+		}
+		authName := strings.ToLower(v.AuthName)
+
+		if _, ok := am[authName]; !ok {
+			errlog.Fatal().Msgf("invalid auth_name for action '%s'", v.Name)
+		}
 	}
 
 	if len(c.RolesQuery) == 0 {
@@ -313,7 +357,7 @@ func (c *config) getAliasMap() map[string][]string {
 	for i := range c.Tables {
 		t := c.Tables[i]
 
-		if len(t.Table) == 0 {
+		if len(t.Table) == 0 || len(t.Columns) != 0 {
 			continue
 		}
 
@@ -347,4 +391,32 @@ func sanitize(s string) string {
 	return varRe2.ReplaceAllStringFunc(s1, func(m string) string {
 		return strings.ToLower(m)
 	})
+}
+
+func getConfigName() string {
+	if len(os.Getenv("GO_ENV")) == 0 {
+		return "dev"
+	}
+
+	ge := strings.ToLower(os.Getenv("GO_ENV"))
+
+	switch {
+	case strings.HasPrefix(ge, "pro"):
+		return "prod"
+
+	case strings.HasPrefix(ge, "sta"):
+		return "stage"
+
+	case strings.HasPrefix(ge, "tes"):
+		return "test"
+
+	case strings.HasPrefix(ge, "dev"):
+		return "dev"
+	}
+
+	return ge
+}
+
+func isDev() bool {
+	return strings.HasPrefix(os.Getenv("GO_ENV"), "dev")
 }

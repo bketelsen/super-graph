@@ -4,9 +4,9 @@ sidebar: auto
 
 # Guide to Super Graph
 
-Super Graph is a micro-service that instantly and without code gives you a high performance and secure GraphQL API. Your GraphQL queries are auto translated into a single fast SQL query. No more writing API code as you develop your web frontend just make the query you need and Super Graph will do the rest.
+Super Graph is a service that instantly and without code gives you a high performance and secure GraphQL API. Your GraphQL queries are auto translated into a single fast SQL query. No more spending weeks or months writing backend API code. Just make the query you need and Super Graph will do the rest. 
 
-Super Graph has a rich feature set like integrating with your existing Ruby on Rails apps, joining your DB with data from remote APIs, Role and Attribute based access control, Supoport for JWT tokens, DB migrations, seeding and a lot more.
+Super Graph has a rich feature set like integrating with your existing Ruby on Rails apps, joining your DB with data from remote APIs, Role and Attribute based access control, Support for JWT tokens, DB migrations, seeding and a lot more.
 
 
 ## Features
@@ -33,6 +33,15 @@ Super Graph has a rich feature set like integrating with your existing Ruby on R
 ```bash
 # clone the repository
 git clone https://github.com/dosco/super-graph
+<<<<<<< HEAD
+=======
+
+# run db in background
+docker-compose up -d db
+
+# see logs and wait until DB is really UP
+docker-compose logs db
+>>>>>>> upstream/master
 
 # setup the demo rails app & database and run it
 docker-compose run rails_app rake db:create db:migrate db:seed
@@ -47,14 +56,14 @@ open http://localhost:3000
 open http://localhost:8080
 ```
 
-::: warning DEMO REQUIREMENTS
+::: tip DEMO REQUIREMENTS
 This demo requires `docker` you can either install it using `brew` or from the
 docker website [https://docs.docker.com/docker-for-mac/install/](https://docs.docker.com/docker-for-mac/install/)
 :::
 
 #### Trying out GraphQL
 
-We currently fully support queries and mutations. Support for `subscriptions` is work in progress. For example the below GraphQL query would fetch two products that belong to the current user where the price is greater than 10.
+We fully support queries and mutations. For example the below GraphQL query would fetch two products that belong to the current user where the price is greater than 10.
 
 #### GQL Query
 
@@ -75,32 +84,6 @@ query {
   }
 }
 ```
-
-In another example the below GraphQL mutation would insert a product into the database. The first part of the below example is the variable data and the second half is the GraphQL mutation. For mutations data has to always ben passed as a variable.
-
-```json
-{
-  "data": { 
-    "name": "Art of Computer Programming",
-    "description": "The Art of Computer Programming (TAOCP) is a comprehensive monograph written by computer scientist Donald Knuth",
-    "price": 30.5
-  }
-}
-```
-
-```graphql
-mutation {
-  product(insert: $data) {
-    id
-    name
-  }
-}
-```
-
-The above GraphQL query returns the JSON result below. It handles all
-kinds of complexity without you having to writing a line of code.
-
-For example there is a while greater than `gt` and a limit clause on a child field. And the `avatar` field is renamed to `picture`. The `password` field is blocked and not returned. Finally the relationship between the `users` table and the `products` table is auto discovered and used.
 
 #### JSON Result
 
@@ -128,19 +111,107 @@ For example there is a while greater than `gt` and a limit clause on a child fie
 }
 ```
 
-#### Try with an authenticated user
+::: tip Testing with a user
+In development mode you can use the `X-User-ID: 4` header to set a user id so you don't have to worries about cookies etc. This can be set using the *HTTP Headers* tab at the bottom of the web UI.
+:::
 
-In development mode you can use the `X-User-ID: 4` header to set a user id so you don't have to worries about cookies etc. This can be set using the *HTTP Headers* tab at the bottom of the web UI you'll see when you visit the above link. You can also directly run queries from the commandline like below.
+In another example the below GraphQL mutation would insert a product into the database. The first part of the below example is the variable data and the second half is the GraphQL mutation. For mutations data has to always ben passed as a variable.
 
-#### Querying the GQL endpoint
+```json
+{
+  "data": { 
+    "name": "Art of Computer Programming",
+    "description": "The Art of Computer Programming (TAOCP) is a comprehensive monograph written by computer scientist Donald Knuth",
+    "price": 30.5
+  }
+}
+```
 
-```bash
+```graphql
+mutation {
+  product(insert: $data) {
+    id
+    name
+  }
+}
+```
 
-# fetch the response json directly from the endpoint using user id 5
-curl 'http://localhost:8080/api/v1/graphql' \
-  -H 'content-type: application/json' \
-  -H 'X-User-ID: 5' \
-  --data-binary '{"query":"{ products { name price users { email }}}"}'
+## Why Super Graph
+
+Let's take a simple example say you want to fetch 5 products priced over 12 dollars along with the photos of the products and the users that owns them. Additionally also fetch the last 10 of your own purchases along with the name and ID of the product you purchased. This is a common type of query to render a view in say an ecommerce app. Lets be honest it's not very exciting write and maintain. Keep in mind the data needed will only continue to grow and change as your app evolves. Developers might find that most ORMs will not be able to do all of this in a single SQL query and will require n+1 queries to fetch all the data and assembly it into the right JSON response.
+
+What if I told you Super Graph will fetch all this data with a single SQL query and without you having to write a single line of code. Also as your app evolves feel free to evolve the query as you like. In our experience Super Graph saves us hundreds or thousands of man hours that we can put towards the more exciting parts of our app.
+
+#### GraphQL Query
+
+```graphql
+query {
+    products(limit: 5, where: { price: { gt: 12 } }) {
+      id
+      name
+      description
+      price
+      photos {
+        url
+      }
+      user {
+        id
+        email
+        picture : avatar
+        full_name
+      }
+  }
+  purchases(
+      limit: 10, 
+      order_by: { created_at: desc } , 
+      where: { user_id: { eq: $user_id } }
+    ) {
+    id 
+    created_at
+    product {
+      id
+      name
+    }
+  }
+}
+```
+
+#### JSON Result
+
+```json
+
+  "data": {
+    "products": [
+      {
+        "id": 1,
+        "name": "Oaked Arrogant Bastard Ale",
+        "description": "Coors lite, European Amber Lager, Perle, 1272 - American Ale II, 38 IBU, 6.4%, 9.7°Blg",
+        "price": 20,
+        "photos: [{
+          "url": "https://www.scienceworld.ca/wp-content/uploads/science-world-beer-flavours.jpg"
+        }],
+        "user": {
+          "id": 1,
+          "email": "user0@demo.com",
+          "picture": "https://robohash.org/sitaliquamquaerat.png?size=300x300&set=set1",
+          "full_name": "Mrs. Wilhemina Hilpert"
+        }
+      },
+      ...
+    ]
+  },
+  "purchases": [
+    {
+      "id": 5,
+      "created_at": "2020-01-24T05:34:39.880599",
+      "product": {
+        "id": 45,
+        "name": "Brooklyn Black",
+      }
+    },
+    ...
+  ]
+}
 ```
 
 ## Get Started
@@ -154,7 +225,7 @@ You can then add your database schema to the migrations, maybe create some seed 
 git clone https://github.com/dosco/super-graph && cd super-graph && make install
 ```
 
-And then create and launch you're new app
+And then create and launch your new app
 
 ```bash
 # create a new app and change to it's directory
@@ -222,6 +293,12 @@ for (i = 0; i < 10; i++) {
 
   users.push(res.user)
 }
+```
+
+If you want to import a lot of data using a CSV file is the best and fastest option. The `import_csv` command uses the `COPY FROM` Postgres method to load massive amounts of data into tables. The first line of the CSV file must be the header with column names.
+
+```javascript
+var post_count = import_csv("posts", "posts.csv")
 ```
 
 You can generate the following fake data for your seeding purposes. Below is the list of fake data functions supported by the built-in fake data library. For example `fake.image_url()` will generate a fake image url or `fake.shuffle_strings(['hello', 'world', 'cool'])` will generate a randomly shuffled version of that array of strings or `fake.rand_string(['hello', 'world', 'cool'])` will return a random string from the array provided.
@@ -651,8 +728,6 @@ query {
 }
 ```
 
-## Mutations
-
 In GraphQL mutations is the operation type for when you need to modify data. Super Graph supports the `insert`, `update`, `upsert` and `delete`. You can also do complex nested inserts and updates.
 
 When using mutations the data must be passed as variables since Super Graphs compiles the query into an prepared statement in the database for maximum speed. Prepared statements are are functions in your code when called they accept arguments and your variables are passed in as those arguments.
@@ -836,8 +911,6 @@ mutation {
 }
 ```
 
-## Nested Mutations
-
 Often you will need to create or update multiple related items at the same time. This can be done using nested mutations. For example you might need to create a product and assign it to a user, or create a user and his products at the same time. You just have to use simple json to define you mutation and Super Graph takes care of the rest.
 
 ### Nested Insert 
@@ -906,7 +979,7 @@ mutation {
 }
 ```
 
-### Nested Updates 
+### Nested Update 
 
 Update a product item first and then assign it to a user
 
@@ -966,9 +1039,116 @@ mutation {
 }
 ```
 
-## Using variables
+### Pagination
 
-Variables (`$product_id`) and their values (`"product_id": 5`) can be passed along side the GraphQL query. Using variables makes for better client side code as well as improved server side SQL query caching. The build-in web-ui also supports setting variables. Not having to manipulate your GraphQL query string to insert values into it makes for cleaner
+This is a must have feature of any API. When you want your users to go thought a list page by page or implement some fancy infinite scroll you're going to need pagination. There are two ways to paginate in Super Graph.
+
+ Limit-Offset
+This is simple enough but also inefficient when working with a large number of total items. Limit, limits the number of items fetched and offset is the point you want to fetch from. The below query will fetch 10 results at a time starting with the 100th item. You will have to keep updating offset (110, 120, 130, etc ) to walk thought the results so make offset a variable.
+
+```graphql
+query {
+  products(limit: 10, offset: 100) {
+    id
+    slug
+    name
+  }
+}
+```
+
+#### Cursor
+This is a powerful and highly efficient way to paginate though a large number of results. Infact it does not matter how many total results there are this will always be lighting fast. You can use a cursor to walk forward of backward though the results. If you plan to implement infinite scroll this is the option you should choose. 
+
+When going this route the results will contain a cursor value this is an encrypted string that you don't have to worry about just pass this back in to the next API call and you'll received the next set of results. The cursor value is encrypted since its contents should only matter to Super Graph and not the client. Also since the primary key is used for this feature it's possible you might not want to leak it's value to clients. 
+
+You will need to set this config value to ensure the encrypted cursor data is secure. If not set a random value is used which will change with each deployment breaking older cursor values that clients might be using so best to set it.
+
+```yaml
+# Secret key for general encryption operations like 
+# encrypting the cursor data
+secret_key: supercalifajalistics
+```
+
+Paginating forward through your results
+
+```json
+{
+  "variables": { 
+    "cursor": "MJoTLbQF4l0GuoDsYmCrpjPeaaIlNpfm4uFU4PQ="
+  }
+}
+```
+
+```graphql
+query {
+  products(first: 10, after: $cursor) {
+    slug
+    name
+  }
+}
+```
+
+Paginating backward through your results
+
+```graphql
+query {
+  products(last: 10, before: $cursor) {
+    slug
+    name
+  }
+}
+```
+
+```graphql
+"data": {
+   "products": [
+    {
+      "slug": "eius-nulla-et-8",
+      "name" "Pale Ale"
+    },
+    {
+      "slug": "sapiente-ut-alias-12",
+      "name" "Brown Ale"
+    }
+    ...
+  ],
+  "products_cursor": "dJwHassm5+d82rGydH2xQnwNxJ1dcj4/cxkh5Cer"
+}
+```
+
+Nested tables can also have cursors. Requesting multiple cursors are supported on a single request but when paginating using a cursor only one table is currently supported. To explain this better, you can only use a `before` or `after` argument with a cursor value to paginate a single table in a query.
+
+```graphql
+query {
+  products(last: 10) {
+    slug
+    name
+    customers(last: 5) {
+      email
+      full_name
+    }
+  }
+}
+```
+
+Multiple order-by arguments are supported. Super Graph is smart enough to allow cursor based pagination when you also need complex sort order like below.
+
+```graphql
+query {
+  products(
+    last: 10
+    before: $cursor
+    order_by: [ price: desc, total_customers: asc ]) {
+    slug
+    name
+  }
+}
+```
+
+
+## Using Variables
+
+Variables (`$product_id`) and their values (`"product_id": 5`) can be passed along side the GraphQL query. Using variables makes for better client side code as well as improved server side SQL query caching. The built-in web-ui also supports setting variables. Not having to manipulate your GraphQL query string to insert values into it makes for cleaner
 and better client side code.
 
 ```javascript
@@ -987,6 +1167,104 @@ fetch('http://localhost:8080/api/v1/graphql', {
 .then(res => res.json())
 .then(res => console.log(res.data));
 ```
+
+## GraphQL with React
+
+This is a quick simple example using `graphql.js` [https://github.com/f/graphql.js/](https://github.com/f/graphql.js/)
+
+```js
+import React, { useState, useEffect } from 'react'
+import graphql from 'graphql.js'
+
+// Create a GraphQL client pointing to Super Graph
+var graph = graphql("http://localhost:3000/api/v1/graphql", { asJSON: true })
+
+const App = () => {
+  const [user, setUser] = useState(null)
+  
+  useEffect(() => {
+    async function action() {
+      // Use the GraphQL client to execute a graphQL query
+      // The second argument to the client are the variables you need to pass
+      const result = await graph(`{ user { id first_name last_name picture_url } }`)()
+      setUser(result)
+    }
+    action()
+  }, []);
+
+  return (
+    <div className="App">
+      <h1>{ JSON.stringify(user) }</h1>
+    </div>
+  );
+}
+```
+
+export default App;
+
+## Advanced Columns
+
+The ablity to have `JSON/JSONB` and `Array` columns is often considered in the top most useful features of Postgres. There are many cases where using an array or a json column saves space and reduces complexity in your app. The only issue with these columns is the really that your SQL queries can get harder to write and maintain. 
+
+Super Graph steps in here to help you by supporting these columns right out of the box. It allows you to work with these columns just like you would with tables. Joining data against or modifying array columns using the `connect` or `disconnect` keywords in mutations is fully supported. Another very useful feature is the ability to treat `json` or `binary json (jsonb)` columns as seperate tables, even using them in nested queries joining against related tables. To replicate these features on your own will take a lot of complex SQL. Using Super Graph means you don't have to deal with any of this it just works.
+
+### Array Columns
+
+Configure a relationship between an array column `tag_ids` which contains integer id's for tags and the column `id` in the table `tags`.
+
+```yaml
+tables:
+  - name: posts
+    columns:
+      - name: tag_ids
+        related_to: tags.id
+
+```
+
+```graphql
+query {
+  posts {
+    title
+    tags {
+      name
+      image
+    }
+  }
+}
+```
+
+### JSON Column
+
+Configure a JSON column called `tag_count` in the table `products` into a seperate table. This JSON column contains a json array of objects each with a tag id and a count of the number of times the tag was used. As a seperate table you can nest it into your GraphQL query and treat it like table using any of the standard features like `order_by`, `limit`, `where clauses`, etc.
+
+The configuration below tells Super Graph to create a synthetic table called `tag_count` using the column `tag_count` from the `products` table. And that this new table has two columns `tag_id` and `count` of the listed types and with the defined relationships.
+
+```yaml
+tables:
+  - name: tag_count
+    table: products
+    columns:
+      - name: tag_id
+        type: bigint
+        related_to: tags.id
+      - name: count
+        type: int
+```
+
+```graphql
+query {
+  products {
+    name
+    tag_counts {
+      count
+      tag {
+        name
+      }
+    }
+  }
+}
+```
+
 
 ## Full text search
 
@@ -1073,45 +1351,45 @@ class AddSearchColumn < ActiveRecord::Migration[5.1]
 end
 ```
 
-## GraphQL with React
+## API Security
 
-This is a quick simple example using `graphql.js` [https://github.com/f/graphql.js/](https://github.com/f/graphql.js/)
+One of the the most common questions I get asked is what happens if a user out on the internet sends queries
+that we don't want run. For example how do we stop him from fetching all users or the emails of users. Our answer to this is that it is not an issue as this cannot happen, let me explain.
 
-```js
-import React, { useState, useEffect } from 'react'
-import graphql from 'graphql.js'
+Super Graph runs in one of two modes `development` or `production`, this is controlled via the config value `production: false` when it's false it's running in development mode and when true, production. In development mode all the **named** queries (including mutations) are saved to the allow list `./config/allow.list`. While in production mode when Super Graph starts only the queries from this allow list file are registered with the database as [prepared statements](https://stackoverflow.com/questions/8263371/how-can-prepared-statements-protect-from-sql-injection-attacks). 
 
-// Create a GraphQL client pointing to Super Graph
-var graph = graphql("http://localhost:3000/api/v1/graphql", { asJSON: true })
+Prepared statements are designed by databases to be fast and secure. They protect against all kinds of sql injection attacks and since they are pre-processed and pre-planned they are much faster to run then raw sql queries. Also there's no GraphQL to SQL compiling happening in production mode which makes your queries lighting fast as they are directly sent to the database with almost no overhead.
 
-const App = () => {
-  const [user, setUser] = useState(null)
-  
-  useEffect(() => {
-    async function action() {
-      // Use the GraphQL client to execute a graphQL query
-      // The second argument to the client are the variables you need to pass
-      const result = await graph(`{ user { id first_name last_name picture_url } }`)()
-      setUser(result)
+In short in production only queries listed in the allow list file `./config/allow.list` can be used, all other queries will be blocked. 
+
+::: tip How to think about the allow list?
+The allow list file is essentially a list of all your exposed API calls and the data that passes within them. It's very easy to build tooling to do things like parsing this file within your tests to ensure fields like `credit_card_no` are not accidently leaked. It's a great way to build compliance tooling and ensure your user data is always safe.
+:::
+
+This is an example of a named query, `getUserWithProducts` is the name you've given to this query it can be anything you like but should be unique across all you're queries. Only named queries are saved in the allow list in development mode.
+
+
+```graphql
+query getUserWithProducts {
+  users {
+    id
+    name
+    products {
+      id
+      name
+      price
     }
-    action()
-  }, []);
-
-  return (
-    <div className="App">
-      <h1>{ JSON.stringify(user) }</h1>
-    </div>
-  );
+  }
 }
 ```
 
-export default App;
+
 
 ## Authentication
 
-You can only have one type of auth enabled. You can either pick Rails or JWT. 
+You can only have one type of auth enabled either Rails or JWT. 
 
-### Rails Auth (Devise / Warden)
+### Ruby on Rails
 
 Almost all Rails apps use Devise or Warden for authentication. Once the user is
 authenticated a session is created with the users ID. The session can either be
@@ -1163,7 +1441,7 @@ auth:
     max_active: 12000
 ```
 
-### JWT Token Auth
+### JWT Tokens
 
 ```yaml
 auth:
@@ -1177,13 +1455,66 @@ auth:
     public_key_type: ecdsa #rsa
 ```
 
-For JWT tokens we currently support tokens from a provider like Auth0
-or if you have a custom solution then we look for the `user_id` in the
-`subject` claim of of the `id token`. If you pick Auth0 then we derive two variables from the token `user_id` and `user_id_provider` for to use in your filters.
+For JWT tokens we currently support tokens from a provider like Auth0 or if you have a custom solution then we look for the `user_id` in the `subject` claim of of the `id token`. If you pick Auth0 then we derive two variables from the token `user_id` and `user_id_provider` for to use in your filters.
 
 We can get the JWT token either from the `authorization` header where we expect it to be a `bearer` token or if `cookie` is specified then we look there.
 
 For validation a `secret` or a public key (ecdsa or rsa) is required. When using public keys they have to be in a PEM format file.
+
+### HTTP Headers
+
+```yaml
+header:
+  name: X-AppEngine-QueueName
+  exists: true
+  #value: default
+```
+
+Header auth is usually the best option to authenticate requests to the action endpoints. For example you
+might want to use an action to refresh a materalized view every hour and only want a cron service like the Google AppEngine Cron service to make that request in this case a config similar to the one above will do. 
+
+The `exists: true` parameter ensures that only the existance of the header is checked not its value. The `value` parameter lets you confirm that the value matches the one assgined to the parameter. This helps in the case you are using a shared secret to protect the endpoint.
+
+### Named Auth
+
+```yaml
+# You can add additional named auths to use with actions
+# In this example actions using this auth can only be
+# called from the Google Appengine Cron service that
+# sets a special header to all it's requests
+auths:
+  - name: from_taskqueue
+    type: header
+    header:
+      name: X-Appengine-Cron
+      exists: true
+```
+
+In addition to the default auth configuration you can create additional named auth configurations to be used
+with features like `actions`. For example while your main GraphQL endpoint uses JWT for authentication you may want to use a header value to ensure your actions can only be called by clients having access to a shared secret
+or security header.
+
+## Actions
+
+Actions is a very useful feature that is currently work in progress. For now the best use case for actions is to
+refresh database tables like materialized views or call a database procedure to refresh a cache table, etc. An action creates an http endpoint that anyone can call to have the SQL query executed. The below example will create an endpoint `/api/v1/actions/refresh_leaderboard_users` any request send to that endpoint will cause the sql query to be executed. the `auth_name` points to a named auth that should be used to secure this endpoint. In future we have big plans to allow your own custom code to run using actions.
+
+```yaml
+actions:
+  - name: refresh_leaderboard_users
+    sql: REFRESH MATERIALIZED VIEW CONCURRENTLY "leaderboard_users"
+    auth_name: from_taskqueue
+```
+
+#### Using CURL to test a query
+
+```bash
+# fetch the response json directly from the endpoint using user id 5
+curl 'http://localhost:8080/api/v1/graphql' \
+  -H 'content-type: application/json' \
+  -H 'X-User-ID: 5' \
+  --data-binary '{"query":"{ products { name price users { email }}}"}'
+```
 
 ## Access Control
 
@@ -1196,7 +1527,6 @@ An authenticated request is one where Super Graph can extract an `user_id` based
 The `user` role can be divided up into further roles based on attributes in the database. For example when fetching a list of users, a normal user can only fetch his own entry while an admin can fetch all the users within a company and an admin user can fetch everyone. In some places this is called Attribute based access control. So in way we support both. Role based access control and Attribute based access control.
 
 Super Graph allows you to create roles dynamically using a `roles_query` and `  match` config values.
-
 
 ### Configure RBAC
 
@@ -1237,7 +1567,7 @@ roles:
 
 This configuration is relatively simple to follow the `roles_query` parameter is the query that must be run to help figure out a users role. This query can be as complex as you like and include joins with other tables. 
 
-The individual roles are defined under the `roles` parameter and this includes each table the role has a custom setting for. The role is dynamically matched using the `match` parameter for example in the above case `users.id = 1` means that when the `roles_query` is executed a user with the id `1` willbe assigned the admin role and those that don't match get the `user` role if authenticated successfully or the `anon` role.
+The individual roles are defined under the `roles` parameter and this includes each table the role has a custom setting for. The role is dynamically matched using the `match` parameter for example in the above case `users.id = 1` means that when the `roles_query` is executed a user with the id `1` will be assigned the admin role and those that don't match get the `user` role if authenticated successfully or the `anon` role.
 
 ## Remote Joins
 
@@ -1334,7 +1664,7 @@ tables:
 ```
 
 
-## Configuration files
+## Configuration
 
 Configuration files can either be in YAML or JSON their names are derived from the `GO_ENV` variable, for example `GO_ENV=prod` will cause the `prod.yaml` config file to be used. or `GO_ENV=dev` will use the `dev.yaml`. A path to look for the config files in can be specified using the `-path <folder>` command line argument.
 
@@ -1430,13 +1760,29 @@ auth:
   #   public_key_file: /secrets/public_key.pem
   #   public_key_type: ecdsa #rsa
 
+  # header:
+  #   name: dnt
+  #   exists: true
+  #   value: localhost:8080
+
+# You can add additional named auths to use with actions
+# In this example actions using this auth can only be
+# called from the Google Appengine Cron service that
+# sets a special header to all it's requests
+auths:
+  - name: from_taskqueue
+    type: header
+    header:
+      name: X-Appengine-Cron
+      exists: true
+
 database:
   type: postgres
   host: db
   port: 5432
   dbname: app_development
   user: postgres
-  password: ''
+  password: postgres
 
   #schema: "public"
   #pool_size: 10
@@ -1459,6 +1805,17 @@ database:
     - password
     - encrypted
     - token
+
+# Create custom actions with their own api endpoints
+# For example the below action will be available at /api/v1/actions/refresh_leaderboard_users
+# A request to this url will execute the configured SQL query
+# which in this case refreshes a materialized view in the database.
+# The auth_name is from one of the configured auths
+actions:
+  - name: refresh_leaderboard_users
+    sql: REFRESH MATERIALIZED VIEW CONCURRENTLY "leaderboard_users"
+    auth_name: from_taskqueue
+
 
 tables:
   - name: customers
@@ -1560,9 +1917,74 @@ SG_AUTH_RAILS_REDIS_PASSWORD
 SG_AUTH_JWT_PUBLIC_KEY_FILE
 ```
 
+## YugabyteDB
+
+Yugabyte is an open-source, geo-distrubuted cloud-native relational DB that scales horizontally. Super Graph works with Yugabyte right out of the box. If you think you're data needs will outgrow Postgres and you don't really want to deal with sharding then Yugabyte is the way to go. Just point Super Graph to your Yugabyte DB and everything will just work including running migrations, seeding, querying, mutations, etc.
+
+To use Yugabyte in your local development flow just uncomment the following lines in the `docker-compose.yml` file that is part of your Super Graph app. Also remember to comment out the originl postgres `db` config.
+
+```yaml
+  # Postgres DB
+  # db:
+  #   image: postgres:latest
+  #   ports:
+  #     - "5432:5432"
+  
+  #Standard config to run a single node of Yugabyte
+  yb-master:                                                                                         
+    image: yugabytedb/yugabyte:latest                                                              
+    container_name: yb-master-n1                                                                   
+    command: [ "/home/yugabyte/bin/yb-master",                                                     
+              "--fs_data_dirs=/mnt/disk0,/mnt/disk1",                                              
+              "--master_addresses=yb-master-n1:7100",                                              
+              "--replication_factor=1",                                                            
+              "--enable_ysql=true"]                                                                
+    ports:                                                                                         
+      - "7000:7000"                                                                                  
+    environment:                                                                                   
+      SERVICE_7000_NAME: yb-master                                                                 
+                                                                                                    
+  db:                                                                                        
+    image: yugabytedb/yugabyte:latest                                                              
+    container_name: yb-tserver-n1                                                                  
+    command: [ "/home/yugabyte/bin/yb-tserver",                                                    
+              "--fs_data_dirs=/mnt/disk0,/mnt/disk1",                                              
+              "--start_pgsql_proxy",                                                               
+              "--tserver_master_addrs=yb-master-n1:7100"]                                          
+    ports:                                                                                         
+      - "9042:9042"                                                                                  
+      - "6379:6379"                                                                                  
+      - "5433:5433"                                                                                  
+      - "9000:9000"                                                                                  
+    environment:                                                                                   
+      SERVICE_5433_NAME: ysql                                                                      
+      SERVICE_9042_NAME: ycql                                                                      
+      SERVICE_6379_NAME: yedis                                                                     
+      SERVICE_9000_NAME: yb-tserver                                                                
+    depends_on:                                                                                    
+      - yb-master
+
+  # Environment variables to point Super Graph to Yugabyte
+  # This is required since it uses a different user and port number
+  yourapp_api:
+    image: dosco/super-graph:latest
+    environment:
+      GO_ENV: "development"
+      Uncomment below for Yugabyte DB
+      SG_DATABASE_PORT: 5433
+      SG_DATABASE_USER: yugabyte
+      SG_DATABASE_PASSWORD: yugabyte
+    volumes:
+     - ./config:/config
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+```
+
 ## Developing Super Graph
 
-If you want to build and run Super Graph from code then the below commands will build the web ui and launch Super Graph in developer mode with a watcher to rebuild on code changes. And the demo rails app is also launched to make it essier to test changes.
+If you want to build and run Super Graph from code then the below commands will build the web ui and launch Super Graph in developer mode with a watcher to rebuild on code changes. And the demo rails app is also launched to make it easier to test changes.
 
 ```bash
 

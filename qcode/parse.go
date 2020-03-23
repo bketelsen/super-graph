@@ -17,7 +17,7 @@ type parserType int32
 
 const (
 	maxFields = 100
-	maxArgs   = 10
+	maxArgs   = 25
 )
 
 const (
@@ -167,11 +167,6 @@ func parseSelectionSet(gql []byte) (*Operation, error) {
 		return nil, fmt.Errorf("invalid '%s' found after closing '}'", p.current())
 	}
 
-	// for i := p.pos; i < len(p.items); i++ {
-	// 	fmt.Printf("2>>>> %#v\n", p.items[i])
-	// }
-	//return nil, fmt.Errorf("unexpected token")
-
 	lexPool.Put(l)
 
 	return op, err
@@ -247,7 +242,8 @@ func (p *Parser) parseOp() (*Operation, error) {
 
 	if p.peek(itemArgsOpen) {
 		p.ignore()
-		op.Args, err = p.parseArgs(op.Args)
+
+		op.Args, err = p.parseOpParams(op.Args)
 		if err != nil {
 			return nil, err
 		}
@@ -343,6 +339,13 @@ func (p *Parser) parseFields(fields []Field) ([]Field, error) {
 		if p.peek(itemObjOpen) {
 			p.ignore()
 			st.Push(f.ID)
+
+		} else if p.peek(itemObjClose) {
+			if st.Len() == 0 {
+				break
+			} else {
+				continue
+			}
 		}
 	}
 
@@ -376,6 +379,22 @@ func (p *Parser) parseField(f *Field) error {
 	return nil
 }
 
+func (p *Parser) parseOpParams(args []Arg) ([]Arg, error) {
+	for {
+		if len(args) >= maxArgs {
+			return nil, fmt.Errorf("too many args (max %d)", maxArgs)
+		}
+
+		if p.peek(itemArgsClose) {
+			p.ignore()
+			break
+		}
+		p.next()
+	}
+
+	return args, nil
+}
+
 func (p *Parser) parseArgs(args []Arg) ([]Arg, error) {
 	var err error
 
@@ -388,6 +407,7 @@ func (p *Parser) parseArgs(args []Arg) ([]Arg, error) {
 			p.ignore()
 			break
 		}
+
 		if !p.peek(itemName) {
 			return nil, errors.New("expecting an argument name")
 		}
@@ -561,6 +581,31 @@ func (t parserType) String() string {
 	return fmt.Sprintf("<%s>", v)
 }
 
-func FreeNode(n *Node) {
+// type Frees struct {
+// 	n   *Node
+// 	loc int
+// }
+
+// var freeList []Frees
+
+// func FreeNode(n *Node, loc int) {
+// 	j := -1
+
+// 	for i := range freeList {
+// 		if n == freeList[i].n {
+// 			j = i
+// 			break
+// 		}
+// 	}
+
+// 	if j == -1 {
+// 		nodePool.Put(n)
+// 		freeList = append(freeList, Frees{n, loc})
+// 	} else {
+// 		fmt.Printf(">>>>(%d) RE_FREE %d %p %s %s\n", loc, freeList[j].loc, freeList[j].n, n.Name, n.Type)
+// 	}
+// }
+
+func FreeNode(n *Node, loc int) {
 	nodePool.Put(n)
 }

@@ -32,6 +32,8 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 	state := expectKey
 	ws, we := -1, len(b)
 
+	instr := false
+
 	for i := 0; i < len(b); i++ {
 		// skip any left padding whitespace
 		if ws == -1 && (b[i] == '{' || b[i] == '[') {
@@ -39,11 +41,16 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 		}
 
 		if state == expectObjClose || state == expectListClose {
-			switch b[i] {
-			case '{', '[':
-				d++
-			case '}', ']':
-				d--
+			if b[i-1] != '\\' && b[i] == '"' {
+				instr = !instr
+			}
+			if !instr {
+				switch b[i] {
+				case '{', '[':
+					d++
+				case '}', ']':
+					d--
+				}
 			}
 		}
 
@@ -104,8 +111,9 @@ func Replace(w *bytes.Buffer, b []byte, from, to []Field) error {
 
 		case state == expectValue && b[i] == 'n':
 			state = expectNull
+			s = i
 
-		case state == expectNull && b[i] == 'l':
+		case state == expectNull && (b[i-1] == 'l' && b[i] == 'l'):
 			e = i
 		}
 

@@ -62,6 +62,20 @@ func GetDBInfo(db *pgxpool.Pool) (*DBInfo, error) {
 	return di, nil
 }
 
+func (di *DBInfo) AddTable(t DBTable, cols []DBColumn) {
+	t.ID = di.Tables[len(di.Tables)-1].ID
+
+	di.Tables = append(di.Tables, t)
+	di.colmap[t.Key] = make(map[string]*DBColumn, len(cols))
+
+	for i := range cols {
+		cols[i].ID = int16(i)
+		c := &cols[i]
+		di.colmap[t.Key][c.Key] = c
+	}
+	di.Columns = append(di.Columns, cols)
+}
+
 func (di *DBInfo) GetColumn(table, column string) (*DBColumn, bool) {
 	v, ok := di.colmap[strings.ToLower(table)][strings.ToLower(column)]
 	return v, ok
@@ -137,6 +151,7 @@ SELECT
 	pg_catalog.format_type(f.atttypid,f.atttypmod) AS type,  
 	CASE
 	 WHEN f.attndims != 0 THEN true
+	 WHEN right(pg_catalog.format_type(f.atttypid,f.atttypmod), 2) = '[]' THEN true
 	 ELSE false
 	END AS array,
 	CASE  
@@ -152,7 +167,7 @@ SELECT
 		ELSE ''::text
 	END AS foreignkey,
 	CASE
-		WHEN p.contype = ('f'::char) THEN p.confkey
+		WHEN p.contype = ('f'::char) THEN p.confkey::int2[]
 		ELSE ARRAY[]::int2[]
 	END AS foreignkey_fieldnum
 FROM pg_attribute f
@@ -161,7 +176,7 @@ FROM pg_attribute f
 	LEFT JOIN pg_namespace n ON n.oid = c.relnamespace  
 	LEFT JOIN pg_constraint p ON p.conrelid = c.oid AND f.attnum = ANY (p.conkey)  
 	LEFT JOIN pg_class AS g ON p.confrelid = g.oid  
-WHERE c.relkind = ('r'::char)
+WHERE c.relkind IN ('r', 'v', 'm', 'f')
 	AND n.nspname = $1  -- Replace with Schema name  
 	AND c.relname = $2  -- Replace with table name  
 	AND f.attnum > 0
@@ -229,3 +244,13 @@ ORDER BY id;`
 
 	return cols, nil
 }
+
+// func GetValType(type string) qcode.ValType {
+// 	switch {
+// 		case "bigint", "integer", "smallint", "numeric", "bigserial":
+// 			return qcode.ValInt
+// 		case "double precision", "real":
+// 			return qcode.ValFloat
+// 		case ""
+// 	}
+// }

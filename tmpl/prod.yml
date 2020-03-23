@@ -24,13 +24,30 @@ auth_fail_block: true
 # Latency tracing for database queries and remote joins
 # the resulting latency information is returned with the
 # response
-enable_tracing: true
+enable_tracing: false
+
+# Watch the config folder and reload Super Graph
+# with the new configs when a change is detected
+reload_on_config_change: false
 
 # File that points to the database seeding script
 # seed_file: seed.js
 
 # Path pointing to where the migrations can be found
 # migrations_path: migrations
+
+# Secret key for general encryption operations like 
+# encrypting the cursor data
+# secret_key: supercalifajalistics
+
+# CORS: A list of origins a cross-domain request can be executed from. 
+# If the special * value is present in the list, all origins will be allowed. 
+# An origin may contain a wildcard (*) to replace 0 or more 
+# characters (i.e.: http://*.domain.com).
+# cors_allowed_origins: ["*"]
+
+# Debug Cross Origin Resource Sharing requests
+# cors_debug: false
 
 # Postgres related environment Variables
 # SG_DATABASE_HOST
@@ -48,9 +65,9 @@ database:
   type: postgres
   host: db
   port: 5432
-  dbname: {% app_name_slug %}_development
+  dbname: {% app_name_slug %}_production
   user: postgres
-  password: ''
+  password: postgres
   #pool_size: 10
   #max_retries: 0
   #log_level: "debug" 

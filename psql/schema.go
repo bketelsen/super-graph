@@ -15,6 +15,7 @@ type DBSchema struct {
 
 type DBTableInfo struct {
 	Name       string
+	Type       string
 	Singular   bool
 	Columns    []DBColumn
 	PrimaryCol *DBColumn
@@ -29,6 +30,7 @@ const (
 	RelOneToOne RelType = iota + 1
 	RelOneToMany
 	RelOneToManyThrough
+	RelEmbedded
 	RelRemote
 )
 
@@ -51,7 +53,6 @@ type DBRel struct {
 }
 
 func NewDBSchema(info *DBInfo, aliases map[string][]string) (*DBSchema, error) {
-
 	schema := &DBSchema{
 		t:  make(map[string]*DBTableInfo),
 		rm: make(map[string]map[string]*DBRel),
@@ -65,7 +66,14 @@ func NewDBSchema(info *DBInfo, aliases map[string][]string) (*DBSchema, error) {
 	}
 
 	for i, t := range info.Tables {
-		err := schema.updateRelationships(t, info.Columns[i])
+		err := schema.firstDegreeRels(t, info.Columns[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for i, t := range info.Tables {
+		err := schema.secondDegreeRels(t, info.Columns[i])
 		if err != nil {
 			return nil, err
 		}
@@ -83,6 +91,7 @@ func (s *DBSchema) addTable(
 	singular := flect.Singularize(t.Key)
 	s.t[singular] = &DBTableInfo{
 		Name:     t.Name,
+		Type:     t.Type,
 		Singular: true,
 		Columns:  cols,
 		ColMap:   colmap,
@@ -92,6 +101,7 @@ func (s *DBSchema) addTable(
 	plural := flect.Pluralize(t.Key)
 	s.t[plural] = &DBTableInfo{
 		Name:     t.Name,
+		Type:     t.Type,
 		Singular: false,
 		Columns:  cols,
 		ColMap:   colmap,
@@ -128,27 +138,52 @@ func (s *DBSchema) addTable(
 	return nil
 }
 
-func (s *DBSchema) updateRelationships(t DBTable, cols []DBColumn) error {
-	jcols := make([]DBColumn, 0, len(cols))
+func (s *DBSchema) firstDegreeRels(t DBTable, cols []DBColumn) error {
 	ct := t.Key
 	cti, ok := s.t[ct]
 	if !ok {
 		return fmt.Errorf("invalid foreign key table '%s'", ct)
 	}
 
-	for _, c := range cols {
-		if len(c.FKeyTable) == 0 || len(c.FKeyColID) == 0 {
+	for i := range cols {
+		c := cols[i]
+
+		if len(c.FKeyTable) == 0 {
 			continue
 		}
 
 		// Foreign key column name
 		ft := strings.ToLower(c.FKeyTable)
-		fcid := c.FKeyColID[0]
 
 		ti, ok := s.t[ft]
 		if !ok {
 			return fmt.Errorf("invalid foreign key table '%s'", ft)
 		}
+
+		// This is an embedded relationship like when a json/jsonb column
+		// is exposed as a table
+		if c.Name == c.FKeyTable && len(c.FKeyColID) == 0 {
+			rel := &DBRel{Type: RelEmbedded}
+			rel.Left.col = cti.PrimaryCol
+			rel.Left.Table = cti.Name
+			rel.Left.Col = cti.PrimaryCol.Name
+
+			rel.Right.col = &c
+			rel.Right.Table = ti.Name
+			rel.Right.Col = c.Name
+
+			if err := s.SetRel(ft, ct, rel); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if len(c.FKeyColID) == 0 {
+			continue
+		}
+
+		// Foreign key column id
+		fcid := c.FKeyColID[0]
 
 		fc, ok := ti.ColIDMap[fcid]
 		if !ok {
@@ -188,16 +223,63 @@ func (s *DBSchema) updateRelationships(t DBTable, cols []DBColumn) error {
 			rel2 = &DBRel{Type: RelOneToMany}
 		}
 
+		rel2.Left.col = fc
 		rel2.Left.Table = c.FKeyTable
 		rel2.Left.Col = fc.Name
 		rel2.Left.Array = fc.Array
 
+		rel2.Right.col = &c
 		rel2.Right.Table = t.Name
 		rel2.Right.Col = c.Name
 		rel2.Right.Array = c.Array
 
 		if err := s.SetRel(ft, ct, rel2); err != nil {
 			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *DBSchema) secondDegreeRels(t DBTable, cols []DBColumn) error {
+	jcols := make([]DBColumn, 0, len(cols))
+	ct := t.Key
+	cti, ok := s.t[ct]
+	if !ok {
+		return fmt.Errorf("invalid foreign key table '%s'", ct)
+	}
+
+	for i := range cols {
+		c := cols[i]
+
+		if len(c.FKeyTable) == 0 {
+			continue
+		}
+
+		// Foreign key column name
+		ft := strings.ToLower(c.FKeyTable)
+
+		ti, ok := s.t[ft]
+		if !ok {
+			return fmt.Errorf("invalid foreign key table '%s'", ft)
+		}
+
+		// This is an embedded relationship like when a json/jsonb column
+		// is exposed as a table
+		if c.Name == c.FKeyTable && len(c.FKeyColID) == 0 {
+			continue
+		}
+
+		if len(c.FKeyColID) == 0 {
+			continue
+		}
+
+		// Foreign key column id
+		fcid := c.FKeyColID[0]
+
+		if _, ok := ti.ColIDMap[fcid]; !ok {
+			return fmt.Errorf("invalid foreign key column id '%d' for table '%s'",
+				fcid, ti.Name)
 		}
 
 		jcols = append(jcols, c)
@@ -249,9 +331,11 @@ func (s *DBSchema) updateSchemaOTMT(
 	rel1.Through = ti.Name
 	rel1.ColT = col2.Name
 
+	rel1.Left.col = &col2
 	rel1.Left.Table = col2.FKeyTable
 	rel1.Left.Col = fc2.Name
 
+	rel1.Right.col = &col1
 	rel1.Right.Table = ti.Name
 	rel1.Right.Col = col1.Name
 
@@ -265,9 +349,11 @@ func (s *DBSchema) updateSchemaOTMT(
 	rel2.Through = ti.Name
 	rel2.ColT = col1.Name
 
+	rel1.Left.col = fc1
 	rel2.Left.Table = col1.FKeyTable
 	rel2.Left.Col = fc1.Name
 
+	rel1.Right.col = &col2
 	rel2.Right.Table = ti.Name
 	rel2.Right.Col = col2.Name
 
@@ -287,6 +373,9 @@ func (s *DBSchema) GetTable(table string) (*DBTableInfo, error) {
 }
 
 func (s *DBSchema) SetRel(child, parent string, rel *DBRel) error {
+	sp := strings.ToLower(flect.Singularize(parent))
+	pp := strings.ToLower(flect.Pluralize(parent))
+
 	sc := strings.ToLower(flect.Singularize(child))
 	pc := strings.ToLower(flect.Pluralize(child))
 
@@ -297,9 +386,6 @@ func (s *DBSchema) SetRel(child, parent string, rel *DBRel) error {
 	if _, ok := s.rm[pc]; !ok {
 		s.rm[pc] = make(map[string]*DBRel)
 	}
-
-	sp := strings.ToLower(flect.Singularize(parent))
-	pp := strings.ToLower(flect.Pluralize(parent))
 
 	if _, ok := s.rm[sc][sp]; !ok {
 		s.rm[sc][sp] = rel

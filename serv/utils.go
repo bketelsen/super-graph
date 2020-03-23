@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/dosco/super-graph/jsn"
@@ -20,6 +21,14 @@ func mkkey(h *xxhash.Digest, k1 string, k2 string) uint64 {
 	h.Reset()
 
 	return v
+}
+
+// nolint: errcheck
+func stmtHash(name string, role string) string {
+	h := sha1.New()
+	io.WriteString(h, strings.ToLower(name))
+	io.WriteString(h, role)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // nolint: errcheck
@@ -108,30 +117,6 @@ func al(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
-func gqlName(b string) string {
-	state, s := 0, 0
-
-	for i := 0; i < len(b); i++ {
-		switch {
-		case state == 2 && b[i] == '{':
-			return b[s:i]
-		case state == 2 && b[i] == ' ':
-			return b[s:i]
-		case state == 1 && b[i] == '{':
-			return ""
-		case state == 1 && b[i] != ' ':
-			s = i
-			state = 2
-		case state == 1 && b[i] == ' ':
-			continue
-		case i != 0 && b[i] == ' ' && (b[i-1] == 'n' || b[i-1] == 'y'):
-			state = 1
-		}
-	}
-
-	return ""
-}
-
 func findStmt(role string, stmts []stmt) *stmt {
 	for i := range stmts {
 		if stmts[i].role.Name != role {
@@ -140,4 +125,17 @@ func findStmt(role string, stmts []stmt) *stmt {
 		return &stmts[i]
 	}
 	return nil
+}
+
+func fatalInProd(err error, msg string) {
+	var wg sync.WaitGroup
+
+	if !isDev() {
+		errlog.Fatal().Err(err).Msg(msg)
+	}
+
+	errlog.Error().Err(err).Msg(msg)
+
+	wg.Add(1)
+	wg.Wait()
 }

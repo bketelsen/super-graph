@@ -1,6 +1,8 @@
 package psql
 
 import (
+	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -11,11 +13,14 @@ import (
 
 const (
 	errNotExpected = "Generated SQL did not match what was expected"
+	headerMarker   = "=== RUN"
+	commentMarker  = "---"
 )
 
 var (
 	qcompile *qcode.Compiler
 	pcompile *Compiler
+	expected map[string][]string
 )
 
 func TestMain(m *testing.M) {
@@ -128,92 +133,7 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
-	tables := []DBTable{
-		DBTable{Name: "customers", Type: "table"},
-		DBTable{Name: "users", Type: "table"},
-		DBTable{Name: "products", Type: "table"},
-		DBTable{Name: "purchases", Type: "table"},
-		DBTable{Name: "tags", Type: "table"},
-	}
-
-	columns := [][]DBColumn{
-		[]DBColumn{
-			DBColumn{ID: 1, Name: "id", Type: "bigint", NotNull: true, PrimaryKey: true, UniqueKey: true},
-			DBColumn{ID: 2, Name: "full_name", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 3, Name: "phone", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 4, Name: "email", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 5, Name: "encrypted_password", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 6, Name: "reset_password_token", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 7, Name: "reset_password_sent_at", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 8, Name: "remember_created_at", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 9, Name: "created_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 10, Name: "updated_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false}},
-		[]DBColumn{
-			DBColumn{ID: 1, Name: "id", Type: "bigint", NotNull: true, PrimaryKey: true, UniqueKey: true},
-			DBColumn{ID: 2, Name: "full_name", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 3, Name: "phone", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 4, Name: "avatar", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 5, Name: "email", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 6, Name: "encrypted_password", Type: "character varying", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 7, Name: "reset_password_token", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 8, Name: "reset_password_sent_at", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 9, Name: "remember_created_at", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 10, Name: "created_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 11, Name: "updated_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false}},
-		[]DBColumn{
-			DBColumn{ID: 1, Name: "id", Type: "bigint", NotNull: true, PrimaryKey: true, UniqueKey: true},
-			DBColumn{ID: 2, Name: "name", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 3, Name: "description", Type: "text", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 4, Name: "price", Type: "numeric(7,2)", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 5, Name: "user_id", Type: "bigint", NotNull: false, PrimaryKey: false, UniqueKey: false, FKeyTable: "users", FKeyColID: []int16{1}},
-			DBColumn{ID: 6, Name: "created_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 7, Name: "updated_at", Type: "timestamp without time zone", NotNull: true, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 8, Name: "tsv", Type: "tsvector", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 9, Name: "tags", Type: "text[]", NotNull: false, PrimaryKey: false, UniqueKey: false, FKeyTable: "tags", FKeyColID: []int16{3}, Array: true}},
-		[]DBColumn{
-			DBColumn{ID: 1, Name: "id", Type: "bigint", NotNull: true, PrimaryKey: true, UniqueKey: true},
-			DBColumn{ID: 2, Name: "customer_id", Type: "bigint", NotNull: false, PrimaryKey: false, UniqueKey: false, FKeyTable: "customers", FKeyColID: []int16{1}},
-			DBColumn{ID: 3, Name: "product_id", Type: "bigint", NotNull: false, PrimaryKey: false, UniqueKey: false, FKeyTable: "products", FKeyColID: []int16{1}},
-			DBColumn{ID: 4, Name: "sale_type", Type: "character varying", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 5, Name: "quantity", Type: "integer", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 6, Name: "due_date", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 7, Name: "returned", Type: "timestamp without time zone", NotNull: false, PrimaryKey: false, UniqueKey: false}},
-		[]DBColumn{
-			DBColumn{ID: 1, Name: "id", Type: "bigint", NotNull: true, PrimaryKey: true, UniqueKey: true},
-			DBColumn{ID: 2, Name: "name", Type: "text", NotNull: false, PrimaryKey: false, UniqueKey: false},
-			DBColumn{ID: 3, Name: "slug", Type: "text", NotNull: false, PrimaryKey: false, UniqueKey: false}},
-	}
-
-	for i := range tables {
-		tables[i].Key = strings.ToLower(tables[i].Name)
-		for n := range columns[i] {
-			columns[i][n].Key = strings.ToLower(columns[i][n].Name)
-		}
-	}
-
-	schema := &DBSchema{
-		ver: 110000,
-		t:   make(map[string]*DBTableInfo),
-		rm:  make(map[string]map[string]*DBRel),
-	}
-
-	aliases := map[string][]string{
-		"users": []string{"mes"},
-	}
-
-	for i, t := range tables {
-		err := schema.addTable(t, columns[i], aliases)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	for i, t := range tables {
-		err := schema.updateRelationships(t, columns[i])
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
+	schema := getTestSchema()
 
 	vars := NewVariables(map[string]string{
 		"admin_account_id": "5",
@@ -224,21 +144,94 @@ func TestMain(m *testing.M) {
 		Vars:   vars,
 	})
 
+	expected = make(map[string][]string)
+
+	b, err := ioutil.ReadFile("tests.sql")
+	if err != nil {
+		log.Fatal(err)
+	}
+	text := string(b)
+	lines := strings.Split(text, "\n")
+
+	var h string
+
+	for _, v := range lines {
+		switch {
+		case strings.HasPrefix(v, headerMarker):
+			h = strings.TrimSpace(v[len(headerMarker):])
+
+		case strings.HasPrefix(v, commentMarker):
+			break
+
+		default:
+			v := strings.TrimSpace(v)
+			if len(v) != 0 {
+				expected[h] = append(expected[h], v)
+			}
+		}
+	}
 	os.Exit(m.Run())
 }
 
-func compileGQLToPSQL(gql string, vars Variables, role string) ([]byte, error) {
-	qc, err := qcompile.Compile([]byte(gql), role)
-	if err != nil {
-		return nil, err
+func compileGQLToPSQL(t *testing.T, gql string, vars Variables, role string) {
+	generateTestFile := false
+
+	if generateTestFile {
+		var sqlStmts []string
+
+		for i := 0; i < 100; i++ {
+			qc, err := qcompile.Compile([]byte(gql), role)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, sqlB, err := pcompile.CompileEx(qc, vars)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			sql := string(sqlB)
+
+			match := false
+			for _, s := range sqlStmts {
+				if sql == s {
+					match = true
+					break
+				}
+			}
+
+			if !match {
+				s := string(sql)
+				sqlStmts = append(sqlStmts, s)
+				fmt.Println(s)
+			}
+		}
+
+		return
 	}
 
-	_, sqlStmt, err := pcompile.CompileEx(qc, vars)
-	if err != nil {
-		return nil, err
+	for i := 0; i < 200; i++ {
+		qc, err := qcompile.Compile([]byte(gql), role)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, sqlStmt, err := pcompile.CompileEx(qc, vars)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		failed := true
+
+		for _, sql := range expected[t.Name()] {
+			if string(sqlStmt) == sql {
+				failed = false
+			}
+		}
+
+		if failed {
+			fmt.Println(string(sqlStmt))
+			t.Fatal(errNotExpected)
+		}
 	}
-
-	//fmt.Println(string(sqlStmt))
-
-	return sqlStmt, nil
 }

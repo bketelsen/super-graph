@@ -21,6 +21,10 @@ func initCompilers(c *config) (*qcode.Compiler, *psql.Compiler, error) {
 		return nil, nil, err
 	}
 
+	if err = addTables(c, di); err != nil {
+		return nil, nil, err
+	}
+
 	if err = addForeignKeys(c, di); err != nil {
 		return nil, nil, err
 	}
@@ -50,7 +54,7 @@ func initCompilers(c *config) (*qcode.Compiler, *psql.Compiler, error) {
 }
 
 func initWatcher(cpath string) {
-	if !conf.WatchAndReload {
+	if conf != nil && !conf.WatchAndReload {
 		return
 	}
 
@@ -70,21 +74,41 @@ func initWatcher(cpath string) {
 }
 
 func startHTTP() {
-	hp := strings.SplitN(conf.HostPort, ":", 2)
+	var hostPort string
+	var appName string
 
-	if len(conf.Host) != 0 {
-		hp[0] = conf.Host
+	defaultHP := "0.0.0.0:8080"
+	env := os.Getenv("GO_ENV")
+
+	if conf != nil {
+		appName = conf.AppName
+		hp := strings.SplitN(conf.HostPort, ":", 2)
+
+		if len(hp) == 2 {
+			if len(conf.Host) != 0 {
+				hp[0] = conf.Host
+			}
+
+			if len(conf.Port) != 0 {
+				hp[1] = conf.Port
+			}
+
+			hostPort = fmt.Sprintf("%s:%s", hp[0], hp[1])
+		}
 	}
 
-	if len(conf.Port) != 0 {
-		hp[1] = conf.Port
+	if len(hostPort) == 0 {
+		hostPort = defaultHP
 	}
 
-	hostPort := fmt.Sprintf("%s:%s", hp[0], hp[1])
+	routes, err := routeHandler()
+	if err != nil {
+		errlog.Fatal().Err(err).Send()
+	}
 
 	srv := &http.Server{
 		Addr:           hostPort,
-		Handler:        routeHandler(),
+		Handler:        routes,
 		ReadTimeout:    5 * time.Second,
 		WriteTimeout:   10 * time.Second,
 		MaxHeaderBytes: 1 << 20,
@@ -110,8 +134,8 @@ func startHTTP() {
 		Str("version", version).
 		Str("git_branch", gitBranch).
 		Str("host_post", hostPort).
-		Str("app_name", conf.AppName).
-		Str("env", conf.Env).
+		Str("app_name", appName).
+		Str("env", env).
 		Msgf("%s listening", serverName)
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -121,22 +145,35 @@ func startHTTP() {
 	<-idleConnsClosed
 }
 
-func routeHandler() http.Handler {
-	var apiH http.Handler
+func routeHandler() (http.Handler, error) {
+	mux := http.NewServeMux()
 
-	if conf.HTTPGZip {
-		gzipH := gziphandler.MustNewGzipLevelHandler(6)
-		apiH = gzipH(http.HandlerFunc(apiV1))
-	} else {
-		apiH = http.HandlerFunc(apiV1)
+	if conf == nil {
+		return mux, nil
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", health)
-	mux.Handle("/api/v1/graphql", withAuth(apiH))
+	routes := map[string]http.Handler{
+		"/health":         http.HandlerFunc(health),
+		"/api/v1/graphql": apiV1Handler(),
+	}
+
+	if err := setActionRoutes(routes); err != nil {
+		return nil, err
+	}
 
 	if conf.WebUI {
-		mux.Handle("/", http.FileServer(rice.MustFindBox("../web/build").HTTPBox()))
+		routes["/"] = http.FileServer(rice.MustFindBox("../web/build").HTTPBox())
+	}
+
+	if conf.HTTPGZip {
+		gz := gziphandler.MustNewGzipLevelHandler(6)
+		for k, v := range routes {
+			routes[k] = gz(v)
+		}
+	}
+
+	for k, v := range routes {
+		mux.Handle(k, v)
 	}
 
 	fn := func(w http.ResponseWriter, r *http.Request) {
@@ -144,29 +181,38 @@ func routeHandler() http.Handler {
 		mux.ServeHTTP(w, r)
 	}
 
-	return http.HandlerFunc(fn)
+	return http.HandlerFunc(fn), nil
 }
 
-func getConfigName() string {
-	if len(os.Getenv("GO_ENV")) == 0 {
-		return "dev"
+func setActionRoutes(routes map[string]http.Handler) error {
+	var err error
+
+	for _, a := range conf.Actions {
+		var fn http.Handler
+
+		fn, err = newAction(a)
+		if err != nil {
+			break
+		}
+
+		p := fmt.Sprintf("/api/v1/actions/%s", strings.ToLower(a.Name))
+
+		if authc, ok := findAuth(a.AuthName); ok {
+			routes[p] = withAuth(fn, authc)
+		} else {
+			routes[p] = fn
+		}
 	}
+	return nil
+}
 
-	ge := strings.ToLower(os.Getenv("GO_ENV"))
+func findAuth(name string) (configAuth, bool) {
+	var authc configAuth
 
-	switch {
-	case strings.HasPrefix(ge, "pro"):
-		return "prod"
-
-	case strings.HasPrefix(ge, "sta"):
-		return "stage"
-
-	case strings.HasPrefix(ge, "tes"):
-		return "test"
-
-	case strings.HasPrefix(ge, "dev"):
-		return "dev"
+	for _, a := range conf.Auths {
+		if strings.EqualFold(a.Name, name) {
+			return a, true
+		}
 	}
-
-	return ge
+	return authc, false
 }

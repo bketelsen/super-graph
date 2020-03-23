@@ -63,7 +63,7 @@ func cmdDBCreate(cmd *cobra.Command, args []string) {
 	}
 	defer conn.Close(ctx)
 
-	sql := fmt.Sprintf("CREATE DATABASE %s", conf.DB.DBName)
+	sql := fmt.Sprintf(`CREATE DATABASE "%s"`, conf.DB.DBName)
 
 	_, err = conn.Exec(ctx, sql)
 	if err != nil {
@@ -83,7 +83,7 @@ func cmdDBDrop(cmd *cobra.Command, args []string) {
 	}
 	defer conn.Close(ctx)
 
-	sql := fmt.Sprintf(`DROP DATABASE IF EXISTS %s`, conf.DB.DBName)
+	sql := fmt.Sprintf(`DROP DATABASE IF EXISTS "%s"`, conf.DB.DBName)
 
 	_, err = conn.Exec(ctx, sql)
 	if err != nil {
@@ -309,5 +309,15 @@ func getMigrationVars() map[string]interface{} {
 		"app_name":      strings.Title(conf.AppName),
 		"app_name_slug": strings.ToLower(strings.Replace(conf.AppName, " ", "_", -1)),
 		"env":           strings.ToLower(os.Getenv("GO_ENV")),
+	}
+}
+
+func initConfOnce() {
+	var err error
+
+	if conf == nil {
+		if conf, err = initConf(); err != nil {
+			errlog.Fatal().Err(err).Msg("failed to read config")
+		}
 	}
 }

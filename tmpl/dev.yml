@@ -32,6 +32,19 @@ reload_on_config_change: true
 # Path pointing to where the migrations can be found
 migrations_path: ./config/migrations
 
+# Secret key for general encryption operations like 
+# encrypting the cursor data
+secret_key: supercalifajalistics
+
+# CORS: A list of origins a cross-domain request can be executed from. 
+# If the special * value is present in the list, all origins will be allowed. 
+# An origin may contain a wildcard (*) to replace 0 or more 
+# characters (i.e.: http://*.domain.com).
+cors_allowed_origins: ["*"]
+
+# Debug Cross Origin Resource Sharing requests
+cors_debug: false
+
 # Postgres related environment Variables
 # SG_DATABASE_HOST
 # SG_DATABASE_PORT
@@ -49,7 +62,7 @@ migrations_path: ./config/migrations
 #   sheep: sheep
 
 auth:
-  # Can be 'rails' or 'jwt'
+  # Can be 'rails', 'jwt' or 'header'
   type: rails
   cookie: _{% app_name_slug %}_session
 
@@ -83,13 +96,29 @@ auth:
   #   public_key_file: /secrets/public_key.pem
   #   public_key_type: ecdsa #rsa
 
+  # header:
+  #   name: dnt
+  #   exists: true
+  #   value: localhost:8080
+
+# You can add additional named auths to use with actions
+# In this example actions using this auth can only be
+# called from the Google Appengine Cron service that
+# sets a special header to all it's requests
+auths:
+  - name: from_taskqueue
+    type: header
+    header:
+      name: X-Appengine-Cron
+      exists: true
+
 database:
   type: postgres
   host: db
   port: 5432
   dbname: {% app_name_slug %}_development
   user: postgres
-  password: ''
+  password: postgres
 
   #schema: "public"
   #pool_size: 10
@@ -105,7 +134,9 @@ database:
 
   # Define additional variables here to be used with filters
   variables:
-    admin_account_id: "5"
+    #admin_account_id: "5"
+    admin_account_id: "sql:select id from users where admin = true limit 1"
+
 
   # Field and table names that you wish to block
   blocklist:
@@ -115,6 +146,16 @@ database:
     - password
     - encrypted
     - token
+
+# Create custom actions with their own api endpoints
+# For example the below action will be available at /api/v1/actions/refresh_leaderboard_users
+# A request to this url will execute the configured SQL query
+# which in this case refreshes a materialized view in the database.
+# The auth_name is from one of the configured auths
+actions:
+  - name: refresh_leaderboard_users
+    sql: REFRESH MATERIALIZED VIEW CONCURRENTLY "leaderboard_users"
+    auth_name: from_taskqueue
 
 tables:
   - name: customers
@@ -137,26 +178,15 @@ tables:
     name: me
     table: users
 
-roles_query: "SELECT * FROM users WHERE id = $user_id"
+
+#roles_query: "SELECT * FROM users WHERE id = $user_id"
 
 roles:
   - name: anon
     tables:
-      - name: products
-        limit: 10
-
+      - name: users
         query:
-          columns: ["id", "name", "description" ]
-          aggregation: false
-
-        insert:
-          block: false
-            
-        update:
-          block: false
-
-        delete:
-          block: false
+          limit: 10
 
   - name: user
     tables:
@@ -168,28 +198,24 @@ roles:
         query:
           limit: 50
           filters: ["{ user_id: { eq: $user_id } }"]
-          columns: ["id", "name", "description" ]
           disable_functions: false
 
         insert:
           filters: ["{ user_id: { eq: $user_id } }"]
-          columns: ["id", "name", "description" ]
           presets:
+            - user_id: "$user_id"
             - created_at: "now"
             
         update:
           filters: ["{ user_id: { eq: $user_id } }"]
-          columns:
-            - id
-            - name
           presets:
             - updated_at: "now"
 
         delete:
           block: true
 
-  - name: admin
-    match: id = 1000
-    tables:
-      - name: users
-        filters: []
+  # - name: admin
+  #   match: id = 1000
+  #   tables:
+  #     - name: users
+  #       filters: []

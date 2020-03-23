@@ -51,6 +51,7 @@ type Select struct {
 	Allowed    map[string]struct{}
 	PresetMap  map[string]string
 	PresetList []string
+	SkipRender bool
 }
 
 type Column struct {
@@ -64,6 +65,7 @@ type Exp struct {
 	Col        string
 	NestedCols []string
 	Type       ValType
+	Table      string
 	Val        string
 	ListType   ValType
 	ListVal    []string
@@ -83,9 +85,19 @@ type OrderBy struct {
 	Order Order
 }
 
+type PagingType int
+
+const (
+	PtOffset PagingType = iota
+	PtForward
+	PtBackward
+)
+
 type Paging struct {
+	Type    PagingType
 	Limit   string
 	Offset  string
+	Cursor  bool
 	NoLimit bool
 }
 
@@ -119,6 +131,8 @@ const (
 	OpEqID
 	OpTsQuery
 	OpFalse
+	OpNotDistinct
+	OpDistinct
 )
 
 type ValType int
@@ -131,6 +145,7 @@ const (
 	ValList
 	ValVar
 	ValNone
+	ValRef
 )
 
 type AggregrateOp int
@@ -182,12 +197,19 @@ func NewCompiler(c Config) (*Compiler, error) {
 	return co, nil
 }
 
+func NewFilter() *Exp {
+	ex := expPool.Get().(*Exp)
+	ex.Reset()
+
+	return ex
+}
+
 func (com *Compiler) AddRole(role, table string, trc TRConfig) error {
 	var err error
 	trv := &trval{}
 
 	// query config
-	trv.query.fil, err = compileFilter(trc.Query.Filters)
+	trv.query.fil, trv.query.filNU, err = compileFilter(trc.Query.Filters)
 	if err != nil {
 		return err
 	}
@@ -198,7 +220,8 @@ func (com *Compiler) AddRole(role, table string, trc TRConfig) error {
 	trv.query.disable.funcs = trc.Query.DisableFunctions
 
 	// insert config
-	if trv.insert.fil, err = compileFilter(trc.Insert.Filters); err != nil {
+	trv.insert.fil, trv.insert.filNU, err = compileFilter(trc.Insert.Filters)
+	if err != nil {
 		return err
 	}
 	trv.insert.cols = listToMap(trc.Insert.Columns)
@@ -206,7 +229,8 @@ func (com *Compiler) AddRole(role, table string, trc TRConfig) error {
 	trv.insert.pslist = mapToList(trv.insert.psmap)
 
 	// update config
-	if trv.update.fil, err = compileFilter(trc.Update.Filters); err != nil {
+	trv.update.fil, trv.update.filNU, err = compileFilter(trc.Update.Filters)
+	if err != nil {
 		return err
 	}
 	trv.update.cols = listToMap(trc.Update.Columns)
@@ -214,7 +238,8 @@ func (com *Compiler) AddRole(role, table string, trc TRConfig) error {
 	trv.update.pslist = mapToList(trv.update.psmap)
 
 	// delete config
-	if trv.delete.fil, err = compileFilter(trc.Delete.Filters); err != nil {
+	trv.delete.fil, trv.delete.filNU, err = compileFilter(trc.Delete.Filters)
+	if err != nil {
 		return err
 	}
 	trv.delete.cols = listToMap(trc.Delete.Columns)
@@ -334,13 +359,13 @@ func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 			s.FieldName = s.Name
 		}
 
-		err := com.compileArgs(qc, s, field.Args)
+		err := com.compileArgs(qc, s, field.Args, role)
 		if err != nil {
 			return err
 		}
 
-		// Order is important addFilters must come after compileArgs
-		com.addFilters(qc, s, role)
+		// Order is important AddFilters must come after compileArgs
+		com.AddFilters(qc, s, role)
 
 		if s.ParentID == -1 {
 			qc.Roots = append(qc.Roots, s.ID)
@@ -386,72 +411,82 @@ func (com *Compiler) compileQuery(qc *QCode, op *Operation, role string) error {
 	return nil
 }
 
-func (com *Compiler) addFilters(qc *QCode, sel *Select, role string) {
+func (com *Compiler) AddFilters(qc *QCode, sel *Select, role string) {
 	var fil *Exp
+	var nu bool
 
 	if trv, ok := com.tr[role][sel.Name]; ok {
-		fil = trv.filter(qc.Type)
-	} else {
-		return
+		fil, nu = trv.filter(qc.Type)
+
+	} else if role == "anon" {
+		// Tables not defined under the anon role will not be rendered
+		sel.SkipRender = true
 	}
 
 	if fil == nil {
 		return
 	}
 
+	if nu && role == "anon" {
+		sel.SkipRender = true
+	}
+
 	switch fil.Op {
 	case OpNop:
 	case OpFalse:
 		sel.Where = fil
-
 	default:
-		if sel.Where != nil {
-			ow := sel.Where
-
-			sel.Where = expPool.Get().(*Exp)
-			sel.Where.Reset()
-			sel.Where.Op = OpAnd
-			sel.Where.Children = sel.Where.childrenA[:2]
-			sel.Where.Children[0] = fil
-			sel.Where.Children[1] = ow
-		} else {
-			sel.Where = fil
-		}
+		AddFilter(sel, fil)
 	}
 }
 
-func (com *Compiler) compileArgs(qc *QCode, sel *Select, args []Arg) error {
+func (com *Compiler) compileArgs(qc *QCode, sel *Select, args []Arg, role string) error {
 	var err error
-	var ka bool
+
+	// don't free this arg either previously done or will be free'd
+	// in the future like in psql
+	var df bool
 
 	for i := range args {
 		arg := &args[i]
 
 		switch arg.Name {
 		case "id":
-			err, ka = com.compileArgID(sel, arg)
+			err, df = com.compileArgID(sel, arg)
 
 		case "search":
-			err, ka = com.compileArgSearch(sel, arg)
+			err, df = com.compileArgSearch(sel, arg)
 
 		case "where":
-			err, ka = com.compileArgWhere(sel, arg)
+			err, df = com.compileArgWhere(sel, arg, role)
 
 		case "orderby", "order_by", "order":
-			err, ka = com.compileArgOrderBy(sel, arg)
+			err, df = com.compileArgOrderBy(sel, arg)
 
 		case "distinct_on", "distinct":
-			err, ka = com.compileArgDistinctOn(sel, arg)
+			err, df = com.compileArgDistinctOn(sel, arg)
 
 		case "limit":
-			err, ka = com.compileArgLimit(sel, arg)
+			err, df = com.compileArgLimit(sel, arg)
 
 		case "offset":
-			err, ka = com.compileArgOffset(sel, arg)
+			err, df = com.compileArgOffset(sel, arg)
+
+		case "first":
+			err, df = com.compileArgFirstLast(sel, arg, PtForward)
+
+		case "last":
+			err, df = com.compileArgFirstLast(sel, arg, PtBackward)
+
+		case "after":
+			err, df = com.compileArgAfterBefore(sel, arg, PtForward)
+
+		case "before":
+			err, df = com.compileArgAfterBefore(sel, arg, PtBackward)
 		}
 
-		if !ka {
-			nodePool.Put(arg.Val)
+		if !df {
+			FreeNode(arg.Val, 5)
 		}
 
 		if err != nil {
@@ -465,7 +500,7 @@ func (com *Compiler) compileArgs(qc *QCode, sel *Select, args []Arg) error {
 func (com *Compiler) setMutationType(qc *QCode, args []Arg) error {
 	setActionVar := func(arg *Arg) error {
 		if arg.Val.Type != NodeVar {
-			return fmt.Errorf("value for argument '%s' must be a variable", arg.Name)
+			return argErr(arg.Name, "variable")
 		}
 		qc.ActionVar = arg.Val.Val
 		return nil
@@ -488,7 +523,7 @@ func (com *Compiler) setMutationType(qc *QCode, args []Arg) error {
 			qc.Type = QTDelete
 
 			if arg.Val.Type != NodeBool {
-				return fmt.Errorf("value for argument '%s' must be a boolean", arg.Name)
+				return argErr(arg.Name, "boolen")
 			}
 
 			if arg.Val.Val == "false" {
@@ -501,19 +536,20 @@ func (com *Compiler) setMutationType(qc *QCode, args []Arg) error {
 	return nil
 }
 
-func (com *Compiler) compileArgObj(st *util.Stack, arg *Arg) (*Exp, error) {
+func (com *Compiler) compileArgObj(st *util.Stack, arg *Arg) (*Exp, bool, error) {
 	if arg.Val.Type != NodeObj {
-		return nil, fmt.Errorf("expecting an object")
+		return nil, false, fmt.Errorf("expecting an object")
 	}
 
 	return com.compileArgNode(st, arg.Val, true)
 }
 
-func (com *Compiler) compileArgNode(st *util.Stack, node *Node, usePool bool) (*Exp, error) {
+func (com *Compiler) compileArgNode(st *util.Stack, node *Node, usePool bool) (*Exp, bool, error) {
 	var root *Exp
+	var needsUser bool
 
 	if node == nil || len(node.Children) == 0 {
-		return nil, errors.New("invalid argument value")
+		return nil, false, errors.New("invalid argument value")
 	}
 
 	pushChild(st, nil, node)
@@ -524,9 +560,10 @@ func (com *Compiler) compileArgNode(st *util.Stack, node *Node, usePool bool) (*
 		}
 
 		intf := st.Pop()
+
 		node, ok := intf.(*Node)
 		if !ok || node == nil {
-			return nil, fmt.Errorf("16: unexpected value %v (%t)", intf, intf)
+			return nil, needsUser, fmt.Errorf("16: unexpected value %v (%t)", intf, intf)
 		}
 
 		// Objects inside a list
@@ -542,11 +579,15 @@ func (com *Compiler) compileArgNode(st *util.Stack, node *Node, usePool bool) (*
 
 		ex, err := newExp(st, node, usePool)
 		if err != nil {
-			return nil, err
+			return nil, needsUser, err
 		}
 
 		if ex == nil {
 			continue
+		}
+
+		if ex.Type == ValVar && ex.Val == "user_id" {
+			needsUser = true
 		}
 
 		if node.exp == nil {
@@ -556,22 +597,26 @@ func (com *Compiler) compileArgNode(st *util.Stack, node *Node, usePool bool) (*
 		}
 	}
 
-	pushChild(st, nil, node)
+	if usePool {
+		st.Push(node)
 
-	for {
-		if st.Len() == 0 {
-			break
+		for {
+			if st.Len() == 0 {
+				break
+			}
+			intf := st.Pop()
+			node, ok := intf.(*Node)
+			if !ok || node == nil {
+				continue
+			}
+			for i := range node.Children {
+				st.Push(node.Children[i])
+			}
+			FreeNode(node, 1)
 		}
-		intf := st.Pop()
-		node, _ := intf.(*Node)
-
-		for i := range node.Children {
-			st.Push(node.Children[i])
-		}
-		nodePool.Put(node)
 	}
 
-	return root, nil
+	return root, needsUser, nil
 }
 
 func (com *Compiler) compileArgID(sel *Select, arg *Arg) (error, bool) {
@@ -583,86 +628,58 @@ func (com *Compiler) compileArgID(sel *Select, arg *Arg) (error, bool) {
 		return nil, false
 	}
 
+	if arg.Val.Type != NodeVar {
+		return argErr("id", "variable"), false
+	}
+
 	ex := expPool.Get().(*Exp)
 	ex.Reset()
 
 	ex.Op = OpEqID
+	ex.Type = ValVar
 	ex.Val = arg.Val.Val
-
-	switch arg.Val.Type {
-	case NodeStr:
-		ex.Type = ValStr
-	case NodeInt:
-		ex.Type = ValInt
-	case NodeFloat:
-		ex.Type = ValFloat
-	case NodeVar:
-		ex.Type = ValVar
-	default:
-		return fmt.Errorf("expecting a string, int, float or variable"), false
-	}
 
 	sel.Where = ex
 	return nil, false
 }
 
 func (com *Compiler) compileArgSearch(sel *Select, arg *Arg) (error, bool) {
+	if arg.Val.Type != NodeVar {
+		return argErr("search", "variable"), false
+	}
+
 	ex := expPool.Get().(*Exp)
 	ex.Reset()
 
 	ex.Op = OpTsQuery
+	ex.Type = ValVar
 	ex.Val = arg.Val.Val
-
-	if arg.Val.Type == NodeVar {
-		ex.Type = ValVar
-	} else {
-		ex.Type = ValStr
-	}
 
 	if sel.Args == nil {
 		sel.Args = make(map[string]*Node)
 	}
 
 	sel.Args[arg.Name] = arg.Val
+	AddFilter(sel, ex)
 
-	if sel.Where != nil {
-		ow := sel.Where
-
-		sel.Where = expPool.Get().(*Exp)
-		sel.Where.Reset()
-		sel.Where.Op = OpAnd
-		sel.Where.Children = sel.Where.childrenA[:2]
-		sel.Where.Children[0] = ex
-		sel.Where.Children[1] = ow
-	} else {
-		sel.Where = ex
-	}
 	return nil, true
 }
 
-func (com *Compiler) compileArgWhere(sel *Select, arg *Arg) (error, bool) {
+func (com *Compiler) compileArgWhere(sel *Select, arg *Arg, role string) (error, bool) {
 	st := util.NewStack()
 	var err error
 
-	ex, err := com.compileArgObj(st, arg)
+	ex, nu, err := com.compileArgObj(st, arg)
 	if err != nil {
 		return err, false
 	}
 
-	if sel.Where != nil {
-		ow := sel.Where
-
-		sel.Where = expPool.Get().(*Exp)
-		sel.Where.Reset()
-		sel.Where.Op = OpAnd
-		sel.Where.Children = sel.Where.childrenA[:2]
-		sel.Where.Children[0] = ex
-		sel.Where.Children[1] = ow
-	} else {
-		sel.Where = ex
+	if nu && role == "anon" {
+		sel.SkipRender = true
 	}
+	AddFilter(sel, ex)
 
-	return nil, false
+	return nil, true
 }
 
 func (com *Compiler) compileArgOrderBy(sel *Select, arg *Arg) (error, bool) {
@@ -689,16 +706,12 @@ func (com *Compiler) compileArgOrderBy(sel *Select, arg *Arg) (error, bool) {
 		}
 
 		if _, ok := com.bl[node.Name]; ok {
-			nodePool.Put(node)
+			FreeNode(node, 2)
 			continue
 		}
 
-		if node.Type == NodeObj {
-			for i := range node.Children {
-				st.Push(node.Children[i])
-			}
-			nodePool.Put(node)
-			continue
+		if node.Type != NodeStr && node.Type != NodeVar {
+			return fmt.Errorf("expecting a string or variable"), false
 		}
 
 		ob := &OrderBy{}
@@ -722,7 +735,7 @@ func (com *Compiler) compileArgOrderBy(sel *Select, arg *Arg) (error, bool) {
 
 		setOrderByColName(ob, node)
 		sel.OrderBy = append(sel.OrderBy, ob)
-		nodePool.Put(node)
+		FreeNode(node, 3)
 	}
 	return nil, false
 }
@@ -744,7 +757,7 @@ func (com *Compiler) compileArgDistinctOn(sel *Select, arg *Arg) (error, bool) {
 
 	for i := range node.Children {
 		sel.DistinctOn = append(sel.DistinctOn, node.Children[i].Val)
-		nodePool.Put(node.Children[i])
+		FreeNode(node.Children[i], 5)
 	}
 
 	return nil, false
@@ -754,7 +767,7 @@ func (com *Compiler) compileArgLimit(sel *Select, arg *Arg) (error, bool) {
 	node := arg.Val
 
 	if node.Type != NodeInt {
-		return fmt.Errorf("expecting an integer"), false
+		return argErr("limit", "number"), false
 	}
 
 	sel.Paging.Limit = node.Val
@@ -765,11 +778,36 @@ func (com *Compiler) compileArgLimit(sel *Select, arg *Arg) (error, bool) {
 func (com *Compiler) compileArgOffset(sel *Select, arg *Arg) (error, bool) {
 	node := arg.Val
 
-	if node.Type != NodeInt {
-		return fmt.Errorf("expecting an integer"), false
+	if node.Type != NodeVar {
+		return argErr("offset", "variable"), false
 	}
 
 	sel.Paging.Offset = node.Val
+	return nil, false
+}
+
+func (com *Compiler) compileArgFirstLast(sel *Select, arg *Arg, pt PagingType) (error, bool) {
+	node := arg.Val
+
+	if node.Type != NodeInt {
+		return argErr(arg.Name, "number"), false
+	}
+
+	sel.Paging.Type = pt
+	sel.Paging.Limit = node.Val
+
+	return nil, false
+}
+
+func (com *Compiler) compileArgAfterBefore(sel *Select, arg *Arg, pt PagingType) (error, bool) {
+	node := arg.Val
+
+	if node.Type != NodeVar || node.Val != "cursor" {
+		return fmt.Errorf("value for argument '%s' must be a variable named $cursor", arg.Name), false
+	}
+	sel.Paging.Type = pt
+	sel.Paging.Cursor = true
+
 	return nil, false
 }
 
@@ -780,6 +818,27 @@ func (com *Compiler) getRole(role, field string) *trval {
 		return trv
 	} else {
 		return zeroTrv
+	}
+}
+
+func AddFilter(sel *Select, fil *Exp) {
+	if sel.Where != nil {
+		ow := sel.Where
+
+		if sel.Where.Op != OpAnd || !sel.Where.doFree {
+			sel.Where = expPool.Get().(*Exp)
+			sel.Where.Reset()
+			sel.Where.Op = OpAnd
+			sel.Where.Children = sel.Where.childrenA[:2]
+			sel.Where.Children[0] = fil
+			sel.Where.Children[1] = ow
+
+		} else {
+			sel.Where.Children = append(sel.Where.Children, fil)
+		}
+
+	} else {
+		sel.Where = fil
 	}
 }
 
@@ -797,6 +856,7 @@ func newExp(st *util.Stack, node *Node, usePool bool) (*Exp, error) {
 	} else {
 		ex = &Exp{doFree: false}
 	}
+
 	ex.Children = ex.childrenA[:0]
 
 	switch name {
@@ -877,6 +937,12 @@ func newExp(st *util.Stack, node *Node, usePool bool) (*Exp, error) {
 		ex.Val = node.Val
 	case "is_null":
 		ex.Op = OpIsNull
+		ex.Val = node.Val
+	case "null_eq", "ndis", "not_distinct":
+		ex.Op = OpNotDistinct
+		ex.Val = node.Val
+	case "null_neq", "dis", "distinct":
+		ex.Op = OpDistinct
 		ex.Val = node.Val
 	default:
 		pushChildren(st, node.exp, node)
@@ -973,30 +1039,34 @@ func pushChildren(st *util.Stack, exp *Exp, node *Node) {
 func pushChild(st *util.Stack, exp *Exp, node *Node) {
 	node.Children[0].exp = exp
 	st.Push(node.Children[0])
-
 }
 
-func compileFilter(filter []string) (*Exp, error) {
+func compileFilter(filter []string) (*Exp, bool, error) {
 	var fl *Exp
+	var needsUser bool
+
 	com := &Compiler{}
 	st := util.NewStack()
 
 	if len(filter) == 0 {
-		return &Exp{Op: OpNop, doFree: false}, nil
+		return &Exp{Op: OpNop, doFree: false}, false, nil
 	}
 
 	for i := range filter {
 		if filter[i] == "false" {
-			return &Exp{Op: OpFalse, doFree: false}, nil
+			return &Exp{Op: OpFalse, doFree: false}, false, nil
 		}
 
 		node, err := ParseArgValue(filter[i])
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		f, err := com.compileArgNode(st, node, false)
+		f, nu, err := com.compileArgNode(st, node, false)
 		if err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		if nu {
+			needsUser = true
 		}
 
 		// TODO: Invalid table names in nested where causes fail silently
@@ -1010,7 +1080,7 @@ func compileFilter(filter []string) (*Exp, error) {
 			fl = &Exp{Op: OpAnd, Children: []*Exp{fl, f}, doFree: false}
 		}
 	}
-	return fl, nil
+	return fl, needsUser, nil
 }
 
 func buildPath(a []string) string {
@@ -1100,4 +1170,8 @@ func FreeExp(ex *Exp) {
 	if ex.doFree {
 		expPool.Put(ex)
 	}
+}
+
+func argErr(name, ty string) error {
+	return fmt.Errorf("value for argument '%s' must be a %s", name, ty)
 }

@@ -2,6 +2,7 @@ package jsn
 
 import (
 	"bytes"
+	"io/ioutil"
 	"testing"
 )
 
@@ -9,11 +10,11 @@ var (
 	input1 = `
 	{ 
 	"data": {
-	"test": { "__twitter_id": "ABCD" },
+	"test_1a": { "__twitter_id": "ABCD" },
 	"users": [
 		{
 			"id": 1,
-			"full_name": "'Sidney Stroman'",
+			"full_name": "'Sidney St[1]roman'",
 			"email": "user0@demo.com",
 			"__twitter_id": "2048666903444506956",
 			"embed": {
@@ -108,7 +109,7 @@ var (
 	input2 = `
 	[{
 		"id": 1,
-		"full_name": "Sidney Stroman",
+		"full_name": "Sidney St[1]roman",
 		"email": "user0@demo.com",
 		"__twitter_id": "2048666903444506956",
 		"something": null,
@@ -130,7 +131,7 @@ var (
 	input3 = `
 	{ 
 		"data": {
-			"test": { "__twitter_id": "ABCD" },
+			"test_1a": { "__twitter_id": "ABCD" },
 			"users": [{"id":1,"embed":{"id":8}},{"id":2},{"id":3},{"id":4},{"id":5},{"id":6},{"id":7},{"id":8},{"id":9},{"id":10},{"id":11},{"id":12},{"id":13}]
 		}
 	}`
@@ -138,7 +139,7 @@ var (
 	input4 = `
 	{ "users" : [{
 		"id": 1,
-		"full_name": "Sidney Stroman",
+		"full_name": "Sidney St[1]roman",
 		"email": "user0@demo.com",
 		"__twitter_id": "2048666903444506956",
 		"embed": {
@@ -155,24 +156,31 @@ var (
 		"email": "user1@demo.com",
 		"__twitter_id": [{ "name": "hello" }, { "name": "world"}]
 	}] }`
+
+	input5 = `
+	{"data":{"title":"In September 2018, Slovak police stated that Kuciak was murdered because of his investigative work, and that the murder had been ordered.[9][10] They arrested eight suspects,[11] charging three of them with first-degree murder.[11]","topics":["cpp"]},"a":["1111"]},"thread_slug":"in-september-2018-slovak-police-stated-that-kuciak-7929",}`
+
+	input6 = `
+	{"users" : [{"id" : 1, "email" : "vicram@gmail.com", "slug" : "vikram-rangnekar", "threads" : [], "threads_cursor" : null}, {"id" : 3, "email" : "marareilly@lang.name", "slug" : "raymundo-corwin", "threads" : [{"id" : 9, "title" : "Et alias et aut porro praesentium nam in voluptatem reiciendis quisquam perspiciatis inventore eos quia et et enim qui amet."}, {"id" : 25, "title" : "Ipsam quam nemo culpa tempore amet optio sit sed eligendi autem consequatur quaerat rem velit quibusdam quibusdam optio a voluptatem."}], "threads_cursor" : 25}], "users_cursor" : 3}`
+
+	input7, _ = ioutil.ReadFile("test.json")
 )
 
 func TestGet(t *testing.T) {
 	values := Get([]byte(input1), [][]byte{
+		[]byte("test_1a"),
 		[]byte("__twitter_id"),
 		[]byte("work_email"),
 	})
 
 	expected := []Field{
+		{[]byte("test_1a"), []byte(`{ "__twitter_id": "ABCD" }`)},
 		{[]byte("__twitter_id"), []byte(`"ABCD"`)},
 		{[]byte("__twitter_id"), []byte(`"2048666903444506956"`)},
 		{[]byte("__twitter_id"), []byte(`"ABC123"`)},
 		{[]byte("__twitter_id"), []byte(`"more123"`)},
-		{[]byte("__twitter_id"),
-			[]byte(`[{ "name": "hello" }, { "name": "world"}]`)},
-		{[]byte("__twitter_id"),
-			[]byte(`{ "name": "\"hellos\"", "address": { "work": "1 infinity loop" } }`),
-		},
+		{[]byte("__twitter_id"), []byte(`[{ "name": "hello" }, { "name": "world"}]`)},
+		{[]byte("__twitter_id"), []byte(`{ "name": "\"hellos\"", "address": { "work": "1 infinity loop" } }`)},
 		{[]byte("__twitter_id"), []byte(`1234567890`)},
 		{[]byte("__twitter_id"), []byte(`1.23E`)},
 		{[]byte("__twitter_id"), []byte(`true`)},
@@ -198,6 +206,65 @@ func TestGet(t *testing.T) {
 		if !bytes.Equal(values[i].Value, expected[i].Value) {
 			t.Error(string(values[i].Value), " != ", string(expected[i].Value))
 		}
+	}
+}
+
+func TestGet1(t *testing.T) {
+	values := Get([]byte(input5), [][]byte{
+		[]byte("thread_slug"),
+	})
+
+	expected := []Field{
+		{[]byte("thread_slug"), []byte(`"in-september-2018-slovak-police-stated-that-kuciak-7929"`)},
+	}
+
+	if len(values) != len(expected) {
+		t.Fatal("len(values) != len(expected)")
+	}
+
+	for i := range expected {
+		if !bytes.Equal(values[i].Key, expected[i].Key) {
+			t.Error(string(values[i].Key), " != ", string(expected[i].Key))
+		}
+
+		if !bytes.Equal(values[i].Value, expected[i].Value) {
+			t.Error(string(values[i].Value), " != ", string(expected[i].Value))
+		}
+	}
+}
+
+func TestGet2(t *testing.T) {
+	values := Get([]byte(input6), [][]byte{
+		[]byte("users_cursor"), []byte("threads_cursor"),
+	})
+
+	expected := []Field{
+		{[]byte("threads_cursor"), []byte(`null`)},
+		{[]byte("threads_cursor"), []byte(`25`)},
+		{[]byte("users_cursor"), []byte(`3`)},
+	}
+
+	if len(values) != len(expected) {
+		t.Fatal("len(values) != len(expected)")
+	}
+
+	for i := range expected {
+		if !bytes.Equal(values[i].Key, expected[i].Key) {
+			t.Error(string(values[i].Key), " != ", string(expected[i].Key))
+		}
+
+		if !bytes.Equal(values[i].Value, expected[i].Value) {
+			t.Error(string(values[i].Value), " != ", string(expected[i].Value))
+		}
+	}
+}
+
+func TestGet3(t *testing.T) {
+	values := Get(input7, [][]byte{[]byte("data")})
+	v := values[0].Value
+
+	if !bytes.Equal(v[len(v)-11:], []byte(`Rangnekar"}`)) {
+		t.Fatal("corrupt ending")
 	}
 }
 
@@ -230,7 +297,7 @@ func TestFilter1(t *testing.T) {
 		t.Error(err)
 	}
 
-	expected := `[{"id": 1,"full_name": "Sidney Stroman","embed": {"id": 8,"full_name": "Caroll Orn Sr.","email": "joannarau@hegmann.io","__twitter_id": "ABC123"}},{"id": 2,"full_name": "Jerry Dickinson"}]`
+	expected := `[{"id": 1,"full_name": "Sidney St[1]roman","embed": {"id": 8,"full_name": "Caroll Orn Sr.","email": "joannarau@hegmann.io","__twitter_id": "ABC123"}},{"id": 2,"full_name": "Jerry Dickinson"}]`
 
 	if b.String() != expected {
 		t.Error("Does not match expected json")
@@ -306,7 +373,7 @@ func TestReplace(t *testing.T) {
 
 	expected := `{ "users" : [{
 		"id": 1,
-		"full_name": "Sidney Stroman",
+		"full_name": "Sidney St[1]roman",
 		"email": "user0@demo.com",
 		"__twitter_id": "2048666903444506956",
 		"embed": {
@@ -338,7 +405,7 @@ func TestReplace(t *testing.T) {
 func TestReplaceEmpty(t *testing.T) {
 	var buf bytes.Buffer
 
-	json := `{ "users" : [{"id":1,"full_name":"Sidney Stroman","email":"user0@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":2,"full_name":"Jerry Dickinson","email":"user1@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":3,"full_name":"Kenna Cassin","email":"user2@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":4,"full_name":"Mr. Pat Parisian","email":"rodney@kautzer.biz","__users_twitter_id":"2048666903444506956"}, {"id":5,"full_name":"Bette Ebert","email":"janeenrath@goyette.com","__users_twitter_id":"2048666903444506956"}, {"id":6,"full_name":"Everett Kiehn","email":"michael@bartoletti.com","__users_twitter_id":"2048666903444506956"}, {"id":7,"full_name":"Katrina Cronin","email":"loretaklocko@framivolkman.org","__users_twitter_id":"2048666903444506956"}, {"id":8,"full_name":"Caroll Orn Sr.","email":"joannarau@hegmann.io","__users_twitter_id":"2048666903444506956"}, {"id":9,"full_name":"Gwendolyn Ziemann","email":"renaytoy@rutherford.co","__users_twitter_id":"2048666903444506956"}, {"id":10,"full_name":"Mrs. Rosann Fritsch","email":"holliemosciski@thiel.org","__users_twitter_id":"2048666903444506956"}, {"id":11,"full_name":"Arden Koss","email":"cristobalankunding@howewelch.org","__users_twitter_id":"2048666903444506956"}, {"id":12,"full_name":"Brenton Bauch PhD","email":"renee@miller.co","__users_twitter_id":"2048666903444506956"}, {"id":13,"full_name":"Daine Gleichner","email":"andrea@nienow.co","__users_twitter_id":"2048666903444506956"}] }`
+	json := `{ "users" : [{"id":1,"full_name":"Sidney St[1]roman","email":"user0@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":2,"full_name":"Jerry Dickinson","email":"user1@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":3,"full_name":"Kenna Cassin","email":"user2@demo.com","__users_twitter_id":"2048666903444506956"}, {"id":4,"full_name":"Mr. Pat Parisian","email":"rodney@kautzer.biz","__users_twitter_id":"2048666903444506956"}, {"id":5,"full_name":"Bette Ebert","email":"janeenrath@goyette.com","__users_twitter_id":"2048666903444506956"}, {"id":6,"full_name":"Everett Kiehn","email":"michael@bartoletti.com","__users_twitter_id":"2048666903444506956"}, {"id":7,"full_name":"Katrina Cronin","email":"loretaklocko@framivolkman.org","__users_twitter_id":"2048666903444506956"}, {"id":8,"full_name":"Caroll Orn Sr.","email":"joannarau@hegmann.io","__users_twitter_id":"2048666903444506956"}, {"id":9,"full_name":"Gwendolyn Ziemann","email":"renaytoy@rutherford.co","__users_twitter_id":"2048666903444506956"}, {"id":10,"full_name":"Mrs. Rosann Fritsch","email":"holliemosciski@thiel.org","__users_twitter_id":"2048666903444506956"}, {"id":11,"full_name":"Arden Koss","email":"cristobalankunding@howewelch.org","__users_twitter_id":"2048666903444506956"}, {"id":12,"full_name":"Brenton Bauch PhD","email":"renee@miller.co","__users_twitter_id":"2048666903444506956"}, {"id":13,"full_name":"Daine Gleichner","email":"andrea@nienow.co","__users_twitter_id":"2048666903444506956"}] }`
 
 	err := Replace(&buf, []byte(json), []Field{}, []Field{})
 	if err != nil {
@@ -395,7 +462,7 @@ func TestKeys3(t *testing.T) {
 	json := `{
 		"insert": {
 			"created_at": "now",
-			"test": { "type1": "a", "type2": "b" },
+			"test_1a": { "type1": "a", "type2": "b" },
 			"name": "Hello",
 			"updated_at": "now",
 			"description": "World"
@@ -406,7 +473,7 @@ func TestKeys3(t *testing.T) {
 	fields := Keys([]byte(json))
 
 	exp := []string{
-		"insert", "created_at", "test", "type1", "type2", "name", "updated_at", "description",
+		"insert", "created_at", "test_1a", "type1", "type2", "name", "updated_at", "description",
 		"user",
 	}
 

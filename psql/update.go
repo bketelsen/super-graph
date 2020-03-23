@@ -15,7 +15,10 @@ func (c *compilerContext) renderUpdate(qc *qcode.QCode, w io.Writer,
 
 	update, ok := vars[qc.ActionVar]
 	if !ok {
-		return 0, fmt.Errorf("Variable '%s' not !defined", qc.ActionVar)
+		return 0, fmt.Errorf("variable '%s' not !defined", qc.ActionVar)
+	}
+	if len(update) == 0 {
+		return 0, fmt.Errorf("variable '%s' is empty", qc.ActionVar)
 	}
 
 	io.WriteString(c.w, `WITH "_sg_input" AS (SELECT '{{`)
@@ -125,16 +128,16 @@ func (c *compilerContext) renderUpdateStmt(w io.Writer, qc *qcode.QCode, item re
 		if item.relPC.Type == RelOneToMany {
 			if conn, ok := item.data["where"]; ok {
 				io.WriteString(w, ` AND `)
-				renderWhereFromJSON(w, item.ti.Name, conn)
+				renderWhereFromJSON(w, item.kvitem, "where", conn)
 			} else if conn, ok := item.data["_where"]; ok {
 				io.WriteString(w, ` AND `)
-				renderWhereFromJSON(w, item.ti.Name, conn)
+				renderWhereFromJSON(w, item.kvitem, "_where", conn)
 			}
 		}
 		io.WriteString(w, `)`)
 
 	} else {
-		io.WriteString(w, `WHERE `)
+		io.WriteString(w, ` WHERE `)
 		if err := c.renderWhere(&qc.Selects[0], ti); err != nil {
 			return err
 		}
@@ -165,9 +168,28 @@ func renderNestedUpdateRelColumns(w io.Writer, item kvitem, values bool) error {
 	for _, v := range item.items {
 		if v._ctype > 0 && v.relCP.Type == RelOneToMany {
 			if values {
-				colWithTable(w, v.relCP.Left.Table, v.relCP.Left.Col)
+				// if v.relCP.Right.Array {
+				// 	io.WriteString(w, `array_diff(`)
+				// 	colWithTable(w, v.relCP.Right.Table, v.relCP.Right.Col)
+				// 	io.WriteString(w, `, `)
+				// }
+
+				if v._ctype > 0 {
+					io.WriteString(w, `"_x_`)
+					io.WriteString(w, v.relCP.Left.Table)
+					io.WriteString(w, `".`)
+					quoted(w, v.relCP.Left.Col)
+				} else {
+					colWithTable(w, v.relCP.Left.Table, v.relCP.Left.Col)
+				}
+
+				// if v.relCP.Right.Array {
+				// 	io.WriteString(w, `)`)
+				// }
 			} else {
+
 				quoted(w, v.relCP.Right.Col)
+
 			}
 		}
 	}
@@ -176,12 +198,13 @@ func renderNestedUpdateRelColumns(w io.Writer, item kvitem, values bool) error {
 }
 
 func renderNestedUpdateRelTables(w io.Writer, item kvitem) error {
-	// Render child foreign key columns if child-to-parent
+	// Render tables needed to set values if child-to-parent
 	// relationship is one-to-many
 	for _, v := range item.items {
 		if v._ctype > 0 && v.relCP.Type == RelOneToMany {
-			quoted(w, v.relCP.Left.Table)
-			io.WriteString(w, `, `)
+			io.WriteString(w, `"_x_`)
+			io.WriteString(w, v.relCP.Left.Table)
+			io.WriteString(w, `", `)
 		}
 	}
 
@@ -199,12 +222,16 @@ func (c *compilerContext) renderDelete(qc *qcode.QCode, w io.Writer,
 	quoted(c.w, ti.Name)
 	io.WriteString(c.w, ` WHERE `)
 
+	if root.Where == nil {
+		return 0, errors.New("'where' clause missing in delete mutation")
+	}
+
 	if err := c.renderWhere(root, ti); err != nil {
 		return 0, err
 	}
 
 	io.WriteString(w, ` RETURNING `)
 	quoted(w, ti.Name)
-	io.WriteString(w, `.*)`)
+	io.WriteString(w, `.*) `)
 	return 0, nil
 }

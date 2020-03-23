@@ -15,7 +15,10 @@ func (c *compilerContext) renderInsert(qc *qcode.QCode, w io.Writer,
 
 	insert, ok := vars[qc.ActionVar]
 	if !ok {
-		return 0, fmt.Errorf("Variable '%s' not !defined", qc.ActionVar)
+		return 0, fmt.Errorf("variable '%s' not defined", qc.ActionVar)
+	}
+	if len(insert) == 0 {
+		return 0, fmt.Errorf("variable '%s' is empty", qc.ActionVar)
 	}
 
 	io.WriteString(c.w, `WITH "_sg_input" AS (SELECT '{{`)
@@ -147,7 +150,14 @@ func renderNestedInsertRelColumns(w io.Writer, item kvitem, values bool) error {
 					io.WriteString(w, `, `)
 				}
 				if values {
-					colWithTable(w, v.relCP.Left.Table, v.relCP.Left.Col)
+					if v._ctype > 0 {
+						io.WriteString(w, `"_x_`)
+						io.WriteString(w, v.relCP.Left.Table)
+						io.WriteString(w, `".`)
+						quoted(w, v.relCP.Left.Col)
+					} else {
+						colWithTable(w, v.relCP.Left.Table, v.relCP.Left.Col)
+					}
 				} else {
 					quoted(w, v.relCP.Right.Col)
 				}
@@ -166,12 +176,18 @@ func renderNestedInsertRelTables(w io.Writer, item kvitem) error {
 			io.WriteString(w, `, `)
 		}
 	} else {
-		// Render child foreign key columns if child-to-parent
+		// Render tables needed to set values if child-to-parent
 		// relationship is one-to-many
 		for _, v := range item.items {
 			if v.relCP.Type == RelOneToMany {
-				quoted(w, v.relCP.Left.Table)
-				io.WriteString(w, `, `)
+				if v._ctype > 0 {
+					io.WriteString(w, `"_x_`)
+					io.WriteString(w, v.relCP.Left.Table)
+					io.WriteString(w, `", `)
+				} else {
+					quoted(w, v.relCP.Left.Table)
+					io.WriteString(w, `, `)
+				}
 			}
 		}
 	}

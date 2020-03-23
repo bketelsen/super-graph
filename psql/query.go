@@ -17,6 +17,10 @@ const (
 	closeBlock = 500
 )
 
+var (
+	ErrAllTablesSkipped = errors.New("all tables skipped. cannot render query")
+)
+
 type Variables map[string]json.RawMessage
 
 type Config struct {
@@ -30,7 +34,10 @@ type Compiler struct {
 }
 
 func NewCompiler(conf Config) *Compiler {
-	return &Compiler{conf.Schema, conf.Vars}
+	return &Compiler{
+		schema: conf.Schema,
+		vars:   conf.Vars,
+	}
 }
 
 func (c *Compiler) AddRelationship(child, parent string, rel *DBRel) error {
@@ -65,7 +72,7 @@ func (co *Compiler) CompileEx(qc *qcode.QCode, vars Variables) (uint32, []byte, 
 func (co *Compiler) Compile(qc *qcode.QCode, w io.Writer, vars Variables) (uint32, error) {
 	switch qc.Type {
 	case qcode.QTQuery:
-		return co.compileQuery(qc, w)
+		return co.compileQuery(qc, w, vars)
 	case qcode.QTInsert, qcode.QTUpdate, qcode.QTDelete, qcode.QTUpsert:
 		return co.compileMutation(qc, w, vars)
 	}
@@ -73,54 +80,38 @@ func (co *Compiler) Compile(qc *qcode.QCode, w io.Writer, vars Variables) (uint3
 	return 0, fmt.Errorf("Unknown operation type %d", qc.Type)
 }
 
-func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
+func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer, vars Variables) (uint32, error) {
 	if len(qc.Selects) == 0 {
 		return 0, errors.New("empty query")
 	}
 
 	c := &compilerContext{w, qc.Selects, co}
-	multiRoot := (len(qc.Roots) > 1)
 
 	st := NewIntStack()
+	i := 0
 
-	if multiRoot {
-		io.WriteString(c.w, `SELECT row_to_json("json_root") FROM (SELECT `)
-
-		for i, id := range qc.Roots {
-			root := qc.Selects[id]
-
-			st.Push(root.ID + closeBlock)
-			st.Push(root.ID)
-
-			if i != 0 {
-				io.WriteString(c.w, `, `)
-			}
-
-			io.WriteString(c.w, `"sel_`)
-			int2string(c.w, root.ID)
-			io.WriteString(c.w, `"."json_`)
-			int2string(c.w, root.ID)
-			io.WriteString(c.w, `"`)
-
-			alias(c.w, root.FieldName)
+	io.WriteString(c.w, `SELECT json_build_object(`)
+	for _, id := range qc.Roots {
+		root := &qc.Selects[id]
+		if root.SkipRender || len(root.Cols) == 0 {
+			continue
 		}
-
-		io.WriteString(c.w, ` FROM `)
-
-	} else {
-		root := qc.Selects[0]
-
-		io.WriteString(c.w, `SELECT json_object_agg(`)
-		io.WriteString(c.w, `'`)
-		io.WriteString(c.w, root.FieldName)
-		io.WriteString(c.w, `', `)
-		io.WriteString(c.w, `json_`)
-		int2string(c.w, root.ID)
 
 		st.Push(root.ID + closeBlock)
 		st.Push(root.ID)
 
-		io.WriteString(c.w, `) FROM `)
+		if i != 0 {
+			io.WriteString(c.w, `, `)
+		}
+
+		c.renderRootSelect(root)
+		i++
+	}
+
+	io.WriteString(c.w, `) as "__root" FROM `)
+
+	if i == 0 {
+		return 0, ErrAllTablesSkipped
 	}
 
 	var ignored uint32
@@ -135,8 +126,8 @@ func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
 		if id < closeBlock {
 			sel := &c.s[id]
 
-			if sel.ParentID == -1 {
-				io.WriteString(c.w, `(`)
+			if len(sel.Cols) == 0 {
+				continue
 			}
 
 			ti, err := c.schema.GetTable(sel.Name)
@@ -144,13 +135,17 @@ func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
 				return 0, err
 			}
 
-			if sel.ParentID != -1 {
-				if err = c.renderLateralJoin(sel); err != nil {
-					return 0, err
-				}
+			if sel.ParentID == -1 {
+				io.WriteString(c.w, `(`)
+			} else {
+				c.renderLateralJoin(sel)
 			}
 
-			skipped, err := c.renderSelect(sel, ti)
+			if !ti.Singular {
+				c.renderPluralSelect(sel, ti)
+			}
+
+			skipped, err := c.renderSelect(sel, ti, vars)
 			if err != nil {
 				return 0, err
 			}
@@ -161,6 +156,9 @@ func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
 					continue
 				}
 				child := &c.s[cid]
+				if child.SkipRender {
+					continue
+				}
 
 				st.Push(child.ID + closeBlock)
 				st.Push(child.ID)
@@ -174,40 +172,94 @@ func (co *Compiler) compileQuery(qc *qcode.QCode, w io.Writer) (uint32, error) {
 				return 0, err
 			}
 
-			err = c.renderSelectClose(sel, ti)
-			if err != nil {
-				return 0, err
+			if !ti.Singular {
+				io.WriteString(c.w, `)`)
+				aliasWithID(c.w, "__sel", sel.ID)
 			}
 
-			if sel.ParentID != -1 {
-				if err = c.renderLateralJoinClose(sel); err != nil {
-					return 0, err
-				}
-			} else {
+			if sel.ParentID == -1 {
 				io.WriteString(c.w, `)`)
-				aliasWithID(c.w, `sel`, sel.ID)
+				aliasWithID(c.w, "__sel", sel.ID)
 
 				if st.Len() != 0 {
 					io.WriteString(c.w, `, `)
 				}
+			} else {
+				c.renderLateralJoinClose(sel)
 			}
 
 			if len(sel.Args) != 0 {
+				i := 0
 				for _, v := range sel.Args {
-					qcode.FreeNode(v)
+					qcode.FreeNode(v, 500)
+					i++
 				}
 			}
 		}
 	}
 
-	if multiRoot {
-		io.WriteString(c.w, `) AS "json_root"`)
-	}
-
 	return ignored, nil
 }
 
-func (c *compilerContext) processChildren(sel *qcode.Select, ti *DBTableInfo) (uint32, []*qcode.Column) {
+func (c *compilerContext) renderPluralSelect(sel *qcode.Select, ti *DBTableInfo) error {
+	io.WriteString(c.w, `SELECT coalesce(json_agg("__sel_`)
+	int2string(c.w, sel.ID)
+	io.WriteString(c.w, `"."json"), '[]') as "json"`)
+
+	if sel.Paging.Type != qcode.PtOffset {
+		n := 0
+
+		// check if primary key already included in order by
+		// query argument
+		for _, ob := range sel.OrderBy {
+			if ob.Col == ti.PrimaryCol.Key {
+				n = 1
+				break
+			}
+		}
+
+		if n == 1 {
+			n = len(sel.OrderBy)
+		} else {
+			n = len(sel.OrderBy) + 1
+		}
+
+		io.WriteString(c.w, `, CONCAT_WS(','`)
+		for i := 0; i < n; i++ {
+			io.WriteString(c.w, `, max("__cur_`)
+			int2string(c.w, int32(i))
+			io.WriteString(c.w, `")`)
+		}
+		io.WriteString(c.w, `) as "cursor"`)
+	}
+
+	io.WriteString(c.w, ` FROM (`)
+	return nil
+}
+
+func (c *compilerContext) renderRootSelect(sel *qcode.Select) error {
+	io.WriteString(c.w, `'`)
+	io.WriteString(c.w, sel.FieldName)
+	io.WriteString(c.w, `', `)
+
+	io.WriteString(c.w, `"__sel_`)
+	int2string(c.w, sel.ID)
+	io.WriteString(c.w, `"."json"`)
+
+	if sel.Paging.Type != qcode.PtOffset {
+		io.WriteString(c.w, `, '`)
+		io.WriteString(c.w, sel.FieldName)
+		io.WriteString(c.w, `_cursor', `)
+
+		io.WriteString(c.w, `"__sel_`)
+		int2string(c.w, sel.ID)
+		io.WriteString(c.w, `"."cursor"`)
+	}
+
+	return nil
+}
+
+func (c *compilerContext) initSelect(sel *qcode.Select, ti *DBTableInfo, vars Variables) (uint32, []*qcode.Column, error) {
 	var skipped uint32
 
 	cols := make([]*qcode.Column, 0, len(sel.Cols))
@@ -217,157 +269,196 @@ func (c *compilerContext) processChildren(sel *qcode.Select, ti *DBTableInfo) (u
 		colmap[sel.Cols[i].Name] = struct{}{}
 	}
 
+	for i := range sel.OrderBy {
+		colmap[sel.OrderBy[i].Col] = struct{}{}
+	}
+
+	if sel.Paging.Type != qcode.PtOffset {
+		colmap[ti.PrimaryCol.Key] = struct{}{}
+		addPrimaryKey := true
+
+		for _, ob := range sel.OrderBy {
+			if ob.Col == ti.PrimaryCol.Key {
+				addPrimaryKey = false
+				break
+			}
+		}
+
+		if addPrimaryKey {
+			ob := &qcode.OrderBy{Col: ti.PrimaryCol.Name, Order: qcode.OrderAsc}
+
+			if sel.Paging.Type == qcode.PtBackward {
+				ob.Order = qcode.OrderDesc
+			}
+			sel.OrderBy = append(sel.OrderBy, ob)
+		}
+	}
+
+	if sel.Paging.Cursor {
+		c.addSeekPredicate(sel)
+	}
+
 	for _, id := range sel.Children {
 		child := &c.s[id]
 
 		rel, err := c.schema.GetRel(child.Name, ti.Name)
 		if err != nil {
-			skipped |= (1 << uint(id))
-			continue
+			return 0, nil, err
+			//skipped |= (1 << uint(id))
+			//continue
 		}
 
 		switch rel.Type {
 		case RelOneToOne, RelOneToMany:
 			if _, ok := colmap[rel.Right.Col]; !ok {
 				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Right.Col, FieldName: rel.Right.Col})
+				colmap[rel.Right.Col] = struct{}{}
 			}
-			colmap[rel.Right.Col] = struct{}{}
 
 		case RelOneToManyThrough:
 			if _, ok := colmap[rel.Left.Col]; !ok {
 				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Left.Col, FieldName: rel.Left.Col})
+				colmap[rel.Left.Col] = struct{}{}
 			}
-			colmap[rel.Left.Col] = struct{}{}
+
+		case RelEmbedded:
+			if _, ok := colmap[rel.Left.Col]; !ok {
+				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Left.Col, FieldName: rel.Left.Col})
+				colmap[rel.Left.Col] = struct{}{}
+			}
 
 		case RelRemote:
 			if _, ok := colmap[rel.Left.Col]; !ok {
 				cols = append(cols, &qcode.Column{Table: ti.Name, Name: rel.Left.Col, FieldName: rel.Right.Col})
+				colmap[rel.Left.Col] = struct{}{}
+				skipped |= (1 << uint(id))
 			}
-			colmap[rel.Left.Col] = struct{}{}
-			skipped |= (1 << uint(id))
 
 		default:
-			skipped |= (1 << uint(id))
+			return 0, nil, fmt.Errorf("unknown relationship %s", rel)
+			//skipped |= (1 << uint(id))
 		}
 	}
 
-	return skipped, cols
+	return skipped, cols, nil
 }
 
-func (c *compilerContext) renderSelect(sel *qcode.Select, ti *DBTableInfo) (uint32, error) {
-	skipped, childCols := c.processChildren(sel, ti)
-	hasOrder := len(sel.OrderBy) != 0
+// This
+// (A, B, C) >= (X, Y, Z)
+//
+// Becomes
+// (A > X)
+//   OR ((A = X) AND (B > Y))
+//   OR ((A = X) AND (B = Y) AND (C > Z))
+//   OR ((A = X) AND (B = Y) AND (C = Z))
 
-	// SELECT
-	if !ti.Singular {
-		//fmt.Fprintf(w, `SELECT coalesce(json_agg("%s"`, c.sel.Name)
-		io.WriteString(c.w, `SELECT coalesce(json_agg("`)
-		io.WriteString(c.w, "json_")
-		int2string(c.w, sel.ID)
-		io.WriteString(c.w, `"`)
+func (c *compilerContext) addSeekPredicate(sel *qcode.Select) error {
+	var or, and *qcode.Exp
 
-		if hasOrder {
-			err := c.renderOrderBy(sel, ti)
-			if err != nil {
-				return skipped, err
+	obLen := len(sel.OrderBy)
+
+	if obLen > 1 {
+		or = qcode.NewFilter()
+		or.Op = qcode.OpOr
+	}
+
+	for i := 0; i < obLen; i++ {
+		if i > 0 {
+			and = qcode.NewFilter()
+			and.Op = qcode.OpAnd
+		}
+
+		for n, ob := range sel.OrderBy {
+			f := qcode.NewFilter()
+			f.Col = ob.Col
+			f.Type = qcode.ValRef
+			f.Table = "__cur"
+			f.Val = ob.Col
+
+			if obLen == 1 {
+				qcode.AddFilter(sel, f)
+				return nil
+			}
+
+			switch {
+			case i > 0 && n != i:
+				f.Op = qcode.OpEquals
+			case ob.Order == qcode.OrderDesc:
+				f.Op = qcode.OpLesserThan
+			default:
+				f.Op = qcode.OpGreaterThan
+			}
+
+			if and != nil {
+				and.Children = append(and.Children, f)
+			} else {
+				or.Children = append(or.Children, f)
+			}
+
+			if n == i {
+				break
 			}
 		}
 
-		//fmt.Fprintf(w, `), '[]') AS "%s" FROM (`, c.sel.Name)
-		io.WriteString(c.w, `), '[]')`)
-		aliasWithID(c.w, "json", sel.ID)
-		io.WriteString(c.w, ` FROM (`)
+		if and != nil {
+			or.Children = append(or.Children, and)
+		}
 	}
 
-	// ROW-TO-JSON
-	io.WriteString(c.w, `SELECT `)
+	qcode.AddFilter(sel, or)
+	return nil
+}
 
-	if len(sel.DistinctOn) != 0 {
-		c.renderDistinctOn(sel, ti)
+func (c *compilerContext) renderSelect(sel *qcode.Select, ti *DBTableInfo, vars Variables) (uint32, error) {
+	var rel *DBRel
+	var err error
+
+	if sel.ParentID != -1 {
+		parent := c.s[sel.ParentID]
+
+		rel, err = c.schema.GetRel(ti.Name, parent.Name)
+		if err != nil {
+			return 0, err
+		}
 	}
 
-	io.WriteString(c.w, `row_to_json((`)
-
-	//fmt.Fprintf(w, `SELECT "%d" FROM (SELECT `, c.sel.ID)
-	io.WriteString(c.w, `SELECT "json_row_`)
-	int2string(c.w, sel.ID)
-	io.WriteString(c.w, `" FROM (SELECT `)
-
-	// Combined column names
-	c.renderColumns(sel, ti)
-
-	c.renderRemoteRelColumns(sel, ti)
-
-	err := c.renderJoinedColumns(sel, ti, skipped)
+	skipped, childCols, err := c.initSelect(sel, ti, vars)
 	if err != nil {
-		return skipped, err
+		return 0, err
 	}
 
-	//fmt.Fprintf(w, `) AS "%d"`, c.sel.ID)
-	io.WriteString(c.w, `)`)
-	aliasWithID(c.w, "json_row", sel.ID)
-
-	//fmt.Fprintf(w, `)) AS "%s"`, c.sel.Name)
-	io.WriteString(c.w, `))`)
-	aliasWithID(c.w, "json", sel.ID)
-	// END-ROW-TO-JSON
-
-	if hasOrder {
-		c.renderOrderByColumns(sel, ti)
+	// SELECT
+	io.WriteString(c.w, `SELECT json_build_object(`)
+	if err := c.renderColumns(sel, ti, skipped); err != nil {
+		return 0, err
 	}
-	// END-SELECT
+	io.WriteString(c.w, `) AS "json"`)
+
+	if sel.Paging.Type != qcode.PtOffset {
+		for i, ob := range sel.OrderBy {
+			io.WriteString(c.w, `, LAST_VALUE(`)
+			colWithTableID(c.w, ti.Name, sel.ID, ob.Col)
+			io.WriteString(c.w, `) OVER() AS "__cur_`)
+			int2string(c.w, int32(i))
+			io.WriteString(c.w, `"`)
+		}
+	}
+
+	io.WriteString(c.w, ` FROM (`)
 
 	// FROM (SELECT .... )
-	err = c.renderBaseSelect(sel, ti, childCols, skipped)
+	err = c.renderBaseSelect(sel, ti, rel, childCols, skipped)
 	if err != nil {
 		return skipped, err
 	}
+
+	//fmt.Fprintf(w, `) AS "%s_%d"`, c.sel.Name, c.sel.ID)
+	io.WriteString(c.w, `)`)
+	aliasWithID(c.w, ti.Name, sel.ID)
+
 	// END-FROM
 
 	return skipped, nil
-}
-
-func (c *compilerContext) renderSelectClose(sel *qcode.Select, ti *DBTableInfo) error {
-	hasOrder := len(sel.OrderBy) != 0
-
-	if hasOrder {
-		err := c.renderOrderBy(sel, ti)
-		if err != nil {
-			return err
-		}
-	}
-
-	switch {
-	case ti.Singular:
-		io.WriteString(c.w, ` LIMIT ('1') :: integer`)
-
-	case len(sel.Paging.Limit) != 0:
-		//fmt.Fprintf(w, ` LIMIT ('%s') :: integer`, c.sel.Paging.Limit)
-		io.WriteString(c.w, ` LIMIT ('`)
-		io.WriteString(c.w, sel.Paging.Limit)
-		io.WriteString(c.w, `') :: integer`)
-
-	case sel.Paging.NoLimit:
-		break
-
-	default:
-		io.WriteString(c.w, ` LIMIT ('20') :: integer`)
-	}
-
-	if len(sel.Paging.Offset) != 0 {
-		//fmt.Fprintf(w, ` OFFSET ('%s') :: integer`, c.sel.Paging.Offset)
-		io.WriteString(c.w, `OFFSET ('`)
-		io.WriteString(c.w, sel.Paging.Offset)
-		io.WriteString(c.w, `') :: integer`)
-	}
-
-	if !ti.Singular {
-		//fmt.Fprintf(w, `) AS "json_agg_%d"`, c.sel.ID)
-		io.WriteString(c.w, `)`)
-		aliasWithID(c.w, "json_agg", sel.ID)
-	}
-
-	return nil
 }
 
 func (c *compilerContext) renderLateralJoin(sel *qcode.Select) error {
@@ -376,9 +467,8 @@ func (c *compilerContext) renderLateralJoin(sel *qcode.Select) error {
 }
 
 func (c *compilerContext) renderLateralJoinClose(sel *qcode.Select) error {
-	//fmt.Fprintf(w, `) AS "%s_%d_join" ON ('true')`, c.sel.Name, c.sel.ID)
-	io.WriteString(c.w, `)`)
-	aliasWithIDSuffix(c.w, sel.Name, sel.ID, "_join")
+	io.WriteString(c.w, `) `)
+	aliasWithID(c.w, "__sel", sel.ID)
 	io.WriteString(c.w, ` ON ('true')`)
 	return nil
 }
@@ -418,39 +508,48 @@ func (c *compilerContext) renderJoinByName(table, parent string, id int32) error
 	return nil
 }
 
-func (c *compilerContext) renderColumns(sel *qcode.Select, ti *DBTableInfo) {
+func (c *compilerContext) renderColumns(sel *qcode.Select, ti *DBTableInfo, skipped uint32) error {
 	i := 0
+	var cn string
+
 	for _, col := range sel.Cols {
-		n := funcPrefixLen(col.Name)
-		if n != 0 {
+		if n := funcPrefixLen(col.Name); n != 0 {
 			if !sel.Functions {
 				continue
 			}
-			if len(sel.Allowed) != 0 {
-				if _, ok := sel.Allowed[col.Name[n:]]; !ok {
-					continue
-				}
-			}
+			cn = col.Name[n:]
 		} else {
-			if len(sel.Allowed) != 0 {
-				if _, ok := sel.Allowed[col.Name]; !ok {
-					continue
-				}
+			cn = col.Name
+
+			if strings.HasSuffix(cn, "_cursor") {
+				continue
+			}
+		}
+
+		if len(sel.Allowed) != 0 {
+			if _, ok := sel.Allowed[cn]; !ok {
+				continue
 			}
 		}
 
 		if i != 0 {
 			io.WriteString(c.w, ", ")
 		}
-		//fmt.Fprintf(w, `"%s_%d"."%s" AS "%s"`,
-		//c.sel.Name, c.sel.ID, col.Name, col.FieldName)
-		colWithTableIDAlias(c.w, ti.Name, sel.ID, col.Name, col.FieldName)
+
+		squoted(c.w, col.FieldName)
+		io.WriteString(c.w, ", ")
+		colWithTableID(c.w, ti.Name, sel.ID, col.Name)
+
 		i++
 	}
+
+	i += c.renderRemoteRelColumns(sel, ti, i)
+
+	return c.renderJoinColumns(sel, ti, skipped, i)
 }
 
-func (c *compilerContext) renderRemoteRelColumns(sel *qcode.Select, ti *DBTableInfo) {
-	i := 0
+func (c *compilerContext) renderRemoteRelColumns(sel *qcode.Select, ti *DBTableInfo, colsRendered int) int {
+	i := colsRendered
 
 	for _, id := range sel.Children {
 		child := &c.s[id]
@@ -462,195 +561,79 @@ func (c *compilerContext) renderRemoteRelColumns(sel *qcode.Select, ti *DBTableI
 		if i != 0 || len(sel.Cols) != 0 {
 			io.WriteString(c.w, ", ")
 		}
-		//fmt.Fprintf(w, `"%s_%d"."%s" AS "%s"`,
-		//c.sel.Name, c.sel.ID, rel.Left.Col, rel.Right.Col)
+
+		squoted(c.w, rel.Right.Col)
+		io.WriteString(c.w, ", ")
 		colWithTableID(c.w, ti.Name, sel.ID, rel.Left.Col)
-		alias(c.w, rel.Right.Col)
 		i++
 	}
+
+	return i
 }
 
-func (c *compilerContext) renderJoinedColumns(sel *qcode.Select, ti *DBTableInfo, skipped uint32) error {
-	colsRendered := len(sel.Cols) != 0
+func (c *compilerContext) renderJoinColumns(sel *qcode.Select, ti *DBTableInfo, skipped uint32, colsRendered int) error {
+	// columns previously rendered
+	i := colsRendered
 
 	for _, id := range sel.Children {
-		skipThis := hasBit(skipped, uint32(id))
-
-		if colsRendered && !skipThis {
-			io.WriteString(c.w, ", ")
-		}
-		if skipThis {
+		if hasBit(skipped, uint32(id)) {
 			continue
 		}
 		childSel := &c.s[id]
 
-		//fmt.Fprintf(w, `"%s_%d_join"."%s" AS "%s"`,
-		//s.Name, s.ID, s.Name, s.FieldName)
-		//if cti.Singular {
-		io.WriteString(c.w, `"`)
-		io.WriteString(c.w, childSel.Name)
-		io.WriteString(c.w, `_`)
+		if i != 0 {
+			io.WriteString(c.w, ", ")
+		}
+
+		squoted(c.w, childSel.FieldName)
+
+		if childSel.SkipRender {
+			io.WriteString(c.w, `, NULL`)
+			continue
+		}
+
+		io.WriteString(c.w, `, "__sel_`)
 		int2string(c.w, childSel.ID)
-		io.WriteString(c.w, `_join"."json_`)
-		int2string(c.w, childSel.ID)
-		io.WriteString(c.w, `" AS "`)
-		io.WriteString(c.w, childSel.FieldName)
-		io.WriteString(c.w, `"`)
+		io.WriteString(c.w, `"."json"`)
+
+		if childSel.Paging.Type != qcode.PtOffset {
+			io.WriteString(c.w, `, '`)
+			io.WriteString(c.w, childSel.FieldName)
+			io.WriteString(c.w, `_cursor', "__sel_`)
+			int2string(c.w, childSel.ID)
+			io.WriteString(c.w, `"."cursor"`)
+		}
+
+		i++
 	}
 
 	return nil
 }
 
-func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
+func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo, rel *DBRel,
 	childCols []*qcode.Column, skipped uint32) error {
-	var groupBy []int
-
-	isRoot := sel.ParentID == -1
+	isRoot := (rel == nil)
 	isFil := (sel.Where != nil && sel.Where.Op != qcode.OpNop)
-	isSearch := sel.Args["search"] != nil
-	isAgg := false
+	hasOrder := len(sel.OrderBy) != 0
 
-	io.WriteString(c.w, ` FROM (SELECT `)
-
-	i := 0
-	for n, col := range sel.Cols {
-		cn := col.Name
-
-		_, isRealCol := ti.ColMap[cn]
-
-		if !isRealCol {
-			if isSearch {
-				switch {
-				case cn == "search_rank":
-					if len(sel.Allowed) != 0 {
-						if _, ok := sel.Allowed[cn]; !ok {
-							continue
-						}
-					}
-					if ti.TSVCol == nil {
-						return errors.New("no ts_vector column found")
-					}
-					cn = ti.TSVCol.Name
-					arg := sel.Args["search"]
-
-					if i != 0 {
-						io.WriteString(c.w, `, `)
-					}
-					//fmt.Fprintf(w, `ts_rank("%s"."%s", websearch_to_tsquery('%s')) AS %s`,
-					//c.sel.Name, cn, arg.Val, col.Name)
-					io.WriteString(c.w, `ts_rank(`)
-					colWithTable(c.w, ti.Name, cn)
-					if c.schema.ver >= 110000 {
-						io.WriteString(c.w, `, websearch_to_tsquery('`)
-					} else {
-						io.WriteString(c.w, `, to_tsquery('`)
-					}
-					io.WriteString(c.w, arg.Val)
-					io.WriteString(c.w, `'))`)
-					alias(c.w, col.Name)
-					i++
-
-				case strings.HasPrefix(cn, "search_headline_"):
-					cn1 := cn[16:]
-					if len(sel.Allowed) != 0 {
-						if _, ok := sel.Allowed[cn1]; !ok {
-							continue
-						}
-					}
-					arg := sel.Args["search"]
-
-					if i != 0 {
-						io.WriteString(c.w, `, `)
-					}
-					//fmt.Fprintf(w, `ts_headline("%s"."%s", websearch_to_tsquery('%s')) AS %s`,
-					//c.sel.Name, cn, arg.Val, col.Name)
-					io.WriteString(c.w, `ts_headline(`)
-					colWithTable(c.w, ti.Name, cn1)
-					if c.schema.ver >= 110000 {
-						io.WriteString(c.w, `, websearch_to_tsquery('`)
-					} else {
-						io.WriteString(c.w, `, to_tsquery('`)
-					}
-					io.WriteString(c.w, arg.Val)
-					io.WriteString(c.w, `'))`)
-					alias(c.w, col.Name)
-					i++
-
-				}
-			} else {
-				pl := funcPrefixLen(cn)
-				if pl == 0 {
-					if i != 0 {
-						io.WriteString(c.w, `, `)
-					}
-					//fmt.Fprintf(w, `'%s not defined' AS %s`, cn, col.Name)
-					io.WriteString(c.w, `'`)
-					io.WriteString(c.w, cn)
-					io.WriteString(c.w, ` not defined'`)
-					alias(c.w, col.Name)
-					i++
-
-				} else if sel.Functions {
-					cn1 := cn[pl:]
-					if len(sel.Allowed) != 0 {
-						if _, ok := sel.Allowed[cn1]; !ok {
-							continue
-						}
-					}
-					if i != 0 {
-						io.WriteString(c.w, `, `)
-					}
-					fn := cn[0 : pl-1]
-					isAgg = true
-
-					//fmt.Fprintf(w, `%s("%s"."%s") AS %s`, fn, c.sel.Name, cn, col.Name)
-					io.WriteString(c.w, fn)
-					io.WriteString(c.w, `(`)
-					colWithTable(c.w, ti.Name, cn1)
-					io.WriteString(c.w, `)`)
-					alias(c.w, col.Name)
-					i++
-
-				}
-			}
-		} else {
-			groupBy = append(groupBy, n)
-			//fmt.Fprintf(w, `"%s"."%s"`, c.sel.Name, cn)
-			if i != 0 {
-				io.WriteString(c.w, `, `)
-			}
-			colWithTable(c.w, ti.Name, cn)
-			i++
-
-		}
+	if sel.Paging.Cursor {
+		c.renderCursorCTE(sel)
 	}
 
-	for _, col := range childCols {
-		if i != 0 {
-			io.WriteString(c.w, `, `)
-		}
+	io.WriteString(c.w, `SELECT `)
 
-		//fmt.Fprintf(w, `"%s"."%s"`, col.Table, col.Name)
-		colWithTable(c.w, col.Table, col.Name)
-		i++
+	if len(sel.DistinctOn) != 0 {
+		c.renderDistinctOn(sel, ti)
+	}
+
+	realColsRendered, isAgg, err := c.renderBaseColumns(sel, ti, childCols, skipped)
+	if err != nil {
+		return err
 	}
 
 	io.WriteString(c.w, ` FROM `)
 
-	//fmt.Fprintf(w, ` FROM "%s"`, c.sel.Name)
-	io.WriteString(c.w, `"`)
-	io.WriteString(c.w, ti.Name)
-	io.WriteString(c.w, `"`)
-
-	// if tn, ok := c.tmap[sel.Name]; ok {
-	// 	//fmt.Fprintf(w, ` FROM "%s" AS "%s"`, tn, c.sel.Name)
-	// 	tableWithAlias(c.w, ti.Name, sel.Name)
-	// } else {
-	// 	//fmt.Fprintf(w, ` FROM "%s"`, c.sel.Name)
-	// 	io.WriteString(c.w, `"`)
-	// 	io.WriteString(c.w, sel.Name)
-	// 	io.WriteString(c.w, `"`)
-	// }
+	c.renderFrom(sel, ti, rel)
 
 	if isRoot && isFil {
 		io.WriteString(c.w, ` WHERE (`)
@@ -666,11 +649,9 @@ func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
 		}
 
 		io.WriteString(c.w, ` WHERE (`)
-
 		if err := c.renderRelationship(sel, ti); err != nil {
 			return err
 		}
-
 		if isFil {
 			io.WriteString(c.w, ` AND `)
 			if err := c.renderWhere(sel, ti); err != nil {
@@ -680,17 +661,19 @@ func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
 		io.WriteString(c.w, `)`)
 	}
 
-	if isAgg {
-		if len(groupBy) != 0 {
-			io.WriteString(c.w, ` GROUP BY `)
+	if isAgg && len(realColsRendered) != 0 {
+		io.WriteString(c.w, ` GROUP BY `)
 
-			for i, id := range groupBy {
-				if i != 0 {
-					io.WriteString(c.w, `, `)
-				}
-				//fmt.Fprintf(w, `"%s"."%s"`, c.sel.Name, c.sel.Cols[id].Name)
-				colWithTable(c.w, ti.Name, sel.Cols[id].Name)
-			}
+		for i, id := range realColsRendered {
+			c.renderComma(i)
+			//fmt.Fprintf(w, `"%s"."%s"`, c.sel.Name, c.sel.Cols[id].Name)
+			colWithTable(c.w, ti.Name, sel.Cols[id].Name)
+		}
+	}
+
+	if hasOrder {
+		if err := c.renderOrderBy(sel, ti); err != nil {
+			return err
 		}
 	}
 
@@ -718,30 +701,64 @@ func (c *compilerContext) renderBaseSelect(sel *qcode.Select, ti *DBTableInfo,
 		io.WriteString(c.w, `') :: integer`)
 	}
 
-	//fmt.Fprintf(w, `) AS "%s_%d"`, c.sel.Name, c.sel.ID)
-	io.WriteString(c.w, `)`)
-	aliasWithID(c.w, ti.Name, sel.ID)
+	return nil
+}
+
+func (c *compilerContext) renderFrom(sel *qcode.Select, ti *DBTableInfo, rel *DBRel) error {
+	if rel != nil && rel.Type == RelEmbedded {
+		// json_to_recordset('[{"a":1,"b":[1,2,3],"c":"bar"}, {"a":2,"b":[1,2,3],"c":"bar"}]') as x(a int, b text, d text);
+
+		io.WriteString(c.w, `"`)
+		io.WriteString(c.w, rel.Left.Table)
+		io.WriteString(c.w, `", `)
+
+		io.WriteString(c.w, ti.Type)
+		io.WriteString(c.w, `_to_recordset(`)
+		colWithTable(c.w, rel.Left.Table, rel.Right.Col)
+		io.WriteString(c.w, `) AS `)
+
+		io.WriteString(c.w, `"`)
+		io.WriteString(c.w, ti.Name)
+		io.WriteString(c.w, `"`)
+
+		io.WriteString(c.w, `(`)
+		for i, col := range ti.Columns {
+			if i != 0 {
+				io.WriteString(c.w, `, `)
+			}
+			io.WriteString(c.w, col.Name)
+			io.WriteString(c.w, ` `)
+			io.WriteString(c.w, col.Type)
+		}
+		io.WriteString(c.w, `)`)
+
+	} else {
+		//fmt.Fprintf(w, ` FROM "%s"`, c.sel.Name)
+		io.WriteString(c.w, `"`)
+		io.WriteString(c.w, ti.Name)
+		io.WriteString(c.w, `"`)
+	}
+
+	if sel.Paging.Cursor {
+		io.WriteString(c.w, `, "__cur"`)
+	}
 
 	return nil
 }
 
-func (c *compilerContext) renderOrderByColumns(sel *qcode.Select, ti *DBTableInfo) {
-	colsRendered := len(sel.Cols) != 0
-
-	for i := range sel.OrderBy {
-		if colsRendered {
-			//io.WriteString(w, ", ")
+func (c *compilerContext) renderCursorCTE(sel *qcode.Select) error {
+	io.WriteString(c.w, `WITH "__cur" AS (SELECT `)
+	for i, ob := range sel.OrderBy {
+		if i != 0 {
 			io.WriteString(c.w, `, `)
 		}
-
-		col := sel.OrderBy[i].Col
-		//fmt.Fprintf(w, `"%s_%d"."%s" AS "%s_%d_%s_ob"`,
-		//c.sel.Name, c.sel.ID, c,
-		//c.sel.Name, c.sel.ID, c)
-		colWithTableID(c.w, ti.Name, sel.ID, col)
-		io.WriteString(c.w, ` AS `)
-		tableIDColSuffix(c.w, sel.Name, sel.ID, col, "_ob")
+		io.WriteString(c.w, `a[`)
+		int2string(c.w, int32(i+1))
+		io.WriteString(c.w, `] as `)
+		quoted(c.w, ob.Col)
 	}
+	io.WriteString(c.w, ` FROM string_to_array('{{cursor}}', ',') as a) `)
+	return nil
 }
 
 func (c *compilerContext) renderRelationship(sel *qcode.Select, ti *DBTableInfo) error {
@@ -807,7 +824,13 @@ func (c *compilerContext) renderRelationshipByName(table, parent string, id int3
 			io.WriteString(c.w, `) = (`)
 			colWithTable(c.w, rel.Through, rel.Right.Col)
 		}
+
+	case RelEmbedded:
+		colWithTable(c.w, rel.Left.Table, rel.Left.Col)
+		io.WriteString(c.w, `) = (`)
+		colWithTableID(c.w, parent, id, rel.Left.Col)
 	}
+
 	io.WriteString(c.w, `))`)
 
 	return nil
@@ -858,7 +881,6 @@ func (c *compilerContext) renderExp(ex *qcode.Exp, ti *DBTableInfo, skipNested b
 			switch val.Op {
 			case qcode.OpFalse:
 				st.Push(val.Op)
-				qcode.FreeExp(val)
 
 			case qcode.OpAnd, qcode.OpOr:
 				st.Push(')')
@@ -869,12 +891,12 @@ func (c *compilerContext) renderExp(ex *qcode.Exp, ti *DBTableInfo, skipNested b
 					}
 				}
 				st.Push('(')
-				qcode.FreeExp(val)
 
 			case qcode.OpNot:
+				//fmt.Printf("1> %s %d %s %s\n", val.Op, len(val.Children), val.Children[0].Op, val.Children[1].Op)
+
 				st.Push(val.Children[0])
 				st.Push(qcode.OpNot)
-				qcode.FreeExp(val)
 
 			default:
 				if !skipNested && len(val.NestedCols) != 0 {
@@ -889,14 +911,13 @@ func (c *compilerContext) renderExp(ex *qcode.Exp, ti *DBTableInfo, skipNested b
 					if err := c.renderOp(val, ti); err != nil {
 						return err
 					}
-					qcode.FreeExp(val)
 				}
 			}
+			//qcode.FreeExp(val)
 
 		default:
 			return fmt.Errorf("12: unexpected value %v (%t)", intf, intf)
 		}
-
 	}
 
 	return nil
@@ -963,8 +984,12 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, ti *DBTableInfo) error {
 
 	switch ex.Op {
 	case qcode.OpEquals:
-		io.WriteString(c.w, `IS NOT DISTINCT FROM`)
+		io.WriteString(c.w, `=`)
 	case qcode.OpNotEquals:
+		io.WriteString(c.w, `!=`)
+	case qcode.OpNotDistinct:
+		io.WriteString(c.w, `IS NOT DISTINCT FROM`)
+	case qcode.OpDistinct:
 		io.WriteString(c.w, `IS DISTINCT FROM`)
 	case qcode.OpGreaterOrEquals:
 		io.WriteString(c.w, `>=`)
@@ -1027,23 +1052,24 @@ func (c *compilerContext) renderOp(ex *qcode.Exp, ti *DBTableInfo) error {
 		io.WriteString(c.w, `((`)
 		colWithTable(c.w, ti.Name, ti.TSVCol.Name)
 		if c.schema.ver >= 110000 {
-			io.WriteString(c.w, `) @@ websearch_to_tsquery('`)
+			io.WriteString(c.w, `) @@ websearch_to_tsquery('{{`)
 		} else {
-			io.WriteString(c.w, `) @@ to_tsquery('`)
+			io.WriteString(c.w, `) @@ to_tsquery('{{`)
 		}
 		io.WriteString(c.w, ex.Val)
-		io.WriteString(c.w, `'))`)
+		io.WriteString(c.w, `}}'))`)
 		return nil
 
 	default:
 		return fmt.Errorf("[Where] unexpected op code %d", ex.Op)
 	}
 
-	if ex.Type == qcode.ValList {
+	switch {
+	case ex.Type == qcode.ValList:
 		c.renderList(ex)
-	} else if col == nil {
+	case col == nil:
 		return errors.New("no column found for expression value")
-	} else {
+	default:
 		c.renderVal(ex, c.vars, col)
 	}
 
@@ -1058,31 +1084,20 @@ func (c *compilerContext) renderOrderBy(sel *qcode.Select, ti *DBTableInfo) erro
 			io.WriteString(c.w, `, `)
 		}
 		ob := sel.OrderBy[i]
+		colWithTable(c.w, ti.Name, ob.Col)
 
 		switch ob.Order {
 		case qcode.OrderAsc:
-			//fmt.Fprintf(w, `"%s_%d.ob.%s" ASC`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` ASC`)
 		case qcode.OrderDesc:
-			//fmt.Fprintf(w, `"%s_%d.ob.%s" DESC`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` DESC`)
 		case qcode.OrderAscNullsFirst:
-			//fmt.Fprintf(w, `"%s_%d.ob.%s" ASC NULLS FIRST`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` ASC NULLS FIRST`)
 		case qcode.OrderDescNullsFirst:
-			//fmt.Fprintf(w, `%s_%d.ob.%s DESC NULLS FIRST`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` DESC NULLLS FIRST`)
 		case qcode.OrderAscNullsLast:
-			//fmt.Fprintf(w, `"%s_%d.ob.%s ASC NULLS LAST`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` ASC NULLS LAST`)
 		case qcode.OrderDescNullsLast:
-			//fmt.Fprintf(w, `%s_%d.ob.%s DESC NULLS LAST`, sel.Name, sel.ID, ob.Col)
-			tableIDColSuffix(c.w, ti.Name, sel.ID, ob.Col, "_ob")
 			io.WriteString(c.w, ` DESC NULLS LAST`)
 		default:
 			return fmt.Errorf("13: unexpected value %v", ob.Order)
@@ -1097,8 +1112,7 @@ func (c *compilerContext) renderDistinctOn(sel *qcode.Select, ti *DBTableInfo) {
 		if i != 0 {
 			io.WriteString(c.w, `, `)
 		}
-		//fmt.Fprintf(w, `"%s_%d.ob.%s"`, c.sel.Name, c.sel.ID, c.sel.DistinctOn[i])
-		tableIDColSuffix(c.w, ti.Name, sel.ID, sel.DistinctOn[i], "_ob")
+		colWithTable(c.w, ti.Name, sel.DistinctOn[i])
 	}
 	io.WriteString(c.w, `) `)
 }
@@ -1125,32 +1139,30 @@ func (c *compilerContext) renderVal(ex *qcode.Exp, vars map[string]string, col *
 	io.WriteString(c.w, ` `)
 
 	switch ex.Type {
-	case qcode.ValBool, qcode.ValInt, qcode.ValFloat:
-		if len(ex.Val) != 0 {
-			io.WriteString(c.w, ex.Val)
-		} else {
-			io.WriteString(c.w, `''`)
-		}
-
-	case qcode.ValStr:
-		io.WriteString(c.w, `'`)
-		io.WriteString(c.w, ex.Val)
-		io.WriteString(c.w, `'`)
-
 	case qcode.ValVar:
-		io.WriteString(c.w, `'`)
-		if val, ok := vars[ex.Val]; ok {
-			io.WriteString(c.w, val)
-		} else {
-			//fmt.Fprintf(w, `'{{%s}}'`, ex.Val)
-			io.WriteString(c.w, `{{`)
+		val, ok := vars[ex.Val]
+		switch {
+		case ok && strings.HasPrefix(val, "sql:"):
+			io.WriteString(c.w, ` (`)
+			io.WriteString(c.w, val[4:])
+			io.WriteString(c.w, `)`)
+		case ok:
+			squoted(c.w, val)
+		default:
+			io.WriteString(c.w, ` '{{`)
 			io.WriteString(c.w, ex.Val)
-			io.WriteString(c.w, `}}`)
+			io.WriteString(c.w, `}}'`)
 		}
-		io.WriteString(c.w, `' :: `)
-		io.WriteString(c.w, col.Type)
+
+	case qcode.ValRef:
+		colWithTable(c.w, ex.Table, ex.Col)
+
+	default:
+		squoted(c.w, ex.Val)
 	}
-	//io.WriteString(c.w, `)`)
+
+	io.WriteString(c.w, ` :: `)
+	io.WriteString(c.w, col.Type)
 }
 
 func funcPrefixLen(fn string) int {
@@ -1200,15 +1212,6 @@ func aliasWithID(w io.Writer, alias string, id int32) {
 	io.WriteString(w, `"`)
 }
 
-func aliasWithIDSuffix(w io.Writer, alias string, id int32, suffix string) {
-	io.WriteString(w, ` AS "`)
-	io.WriteString(w, alias)
-	io.WriteString(w, `_`)
-	int2string(w, id)
-	io.WriteString(w, suffix)
-	io.WriteString(w, `"`)
-}
-
 func colWithTable(w io.Writer, table, col string) {
 	io.WriteString(w, `"`)
 	io.WriteString(w, table)
@@ -1229,27 +1232,16 @@ func colWithTableID(w io.Writer, table string, id int32, col string) {
 	io.WriteString(w, `"`)
 }
 
-func colWithTableIDAlias(w io.Writer, table string, id int32, col, alias string) {
+func quoted(w io.Writer, identifier string) {
 	io.WriteString(w, `"`)
-	io.WriteString(w, table)
-	io.WriteString(w, `_`)
-	int2string(w, id)
-	io.WriteString(w, `"."`)
-	io.WriteString(w, col)
-	io.WriteString(w, `" AS "`)
-	io.WriteString(w, alias)
+	io.WriteString(w, identifier)
 	io.WriteString(w, `"`)
 }
 
-func tableIDColSuffix(w io.Writer, table string, id int32, col, suffix string) {
-	io.WriteString(w, `"`)
-	io.WriteString(w, table)
-	io.WriteString(w, `_`)
-	int2string(w, id)
-	io.WriteString(w, `_`)
-	io.WriteString(w, col)
-	io.WriteString(w, suffix)
-	io.WriteString(w, `"`)
+func squoted(w io.Writer, identifier string) {
+	io.WriteString(w, `'`)
+	io.WriteString(w, identifier)
+	io.WriteString(w, `'`)
 }
 
 const charset = "0123456789"
